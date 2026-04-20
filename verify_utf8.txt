@@ -1,0 +1,43 @@
+﻿ظùç injected env (11) from .env // tip: ظîء suppress logs { quiet: true }
+
+≡ا¤ ARA Financial ظ¤ MVP Verification
+
+==================================================
+
+≡اôï Test Group 1: Authentication & Tenant Setup
+
+[2026-04-16 18:29:56.648 +0200] [32mINFO[39m: [36mMongoDB connected successfully[39m
+node : 
+At line:1 char:1
++ node scripts/verify.js > 
+verify_output.txt 2>&1; type 
+verify_output.t ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~
+    + CategoryInfo          : NotSpec 
+   ified: (:String) [], RemoteExcept  
+  ion
+    + FullyQualifiedErrorId : NativeC 
+   ommandError
+ 
+≡اْح Unexpected error during 
+verification: next is not a function
+TypeError: next is not a function
+    at model.<anonymous> (D:\work\ara 
+financial\project_code\backend\src\com
+mon\plugins\tenantPlugin.js:28:5)
+    at Kareem.execPre (D:\work\ara fin
+ancial\project_code\backend\node_modul
+es\kareem\index.js:68:39)
+    at 
+process.processTicksAndRejections (nod
+e:internal/process/task_queues:103:5)
+
+≡اد╣ Cleaning up test data...
+
+==================================================
+
+≡اôè Results: 0 passed, 1 failed
+
+[2026-04-16 18:29:56.784 +0200] [33mWARN[39m: [36mMongoDB disconnected[39m
+[2026-04-16 18:29:56.784 +0200] [32mINFO[39m: [36mMongoDB disconnected gracefully[39m

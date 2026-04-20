@@ -1,0 +1,1883 @@
+{
+  "info": {
+    "_postman_id": "d2aa24d1-e09f-4f73-90c2-1bc98d2b2b9a",
+    "name": "ara-financial-backend",
+    "description": "Production-ready Postman collection for the ARA Financial backend. Use the companion environment file, run Health Check first, then Register or Login, Apply Egyptian Chart of Accounts Template, Create Fiscal Year, and continue through journals, ledger, reports, dashboard, users, and audit logs. Register only creates the tenant owner and default roles; it does not seed accounts or fiscal periods. JSON responses use { success, data, meta? } on success and { success: false, error } on failure. Export endpoints return downloadable files instead of JSON.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{accessToken}}",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [
+    {
+      "name": "System",
+      "description": "Operational endpoints that do not require authentication.",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "description": "Returns service health, timestamp, and uptime. Use this before the rest of the collection to confirm the API is reachable.",
+            "url": "{{baseUrl}}/api/v1/health"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Health check succeeded', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "description": "Authentication and credential lifecycle endpoints. Register creates a tenant plus owner user and seeds default roles, but you still need accounts and fiscal periods before journal and report flows. Login and refresh requests store tokens into the active environment.",
+      "item": [
+        {
+          "name": "Register Tenant Owner",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "Creates a new tenant, seeds owner/admin/accountant roles, creates the owner user, and returns access and refresh tokens. This does not apply the chart of accounts template and does not create fiscal periods.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{ownerEmail}}\",\n  \"password\": \"{{ownerPassword}}\",\n  \"name\": \"{{ownerName}}\",\n  \"companyName\": \"{{companyName}}\",\n  \"language\": \"{{language}}\"\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/auth/register"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const currentOwnerEmail = pm.environment.get('ownerEmail');",
+                  "if (!currentOwnerEmail || currentOwnerEmail === 'owner@example.com') {",
+                  "  pm.environment.set('ownerEmail', `owner.${Date.now()}@example.com`);",
+                  "}",
+                  "const currentCompanyName = pm.environment.get('companyName');",
+                  "if (!currentCompanyName || currentCompanyName === 'ARA QA Tenant') {",
+                  "  pm.environment.set('companyName', `ARA QA Tenant ${Date.now()}`);",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Register succeeded', function () {",
+                  "  pm.response.to.have.status(201);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "if (json.success && json.data) {",
+                  "  pm.environment.set('accessToken', json.data.accessToken || '');",
+                  "  pm.environment.set('refreshToken', json.data.refreshToken || '');",
+                  "  pm.environment.set('ownerAccessToken', json.data.accessToken || '');",
+                  "  pm.environment.set('ownerRefreshToken', json.data.refreshToken || '');",
+                  "  pm.environment.set('tenantId', json.data.tenant?._id || '');",
+                  "  pm.environment.set('userId', json.data.user?._id || '');",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Login Owner",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "Authenticates a user with email and password. Successful responses refresh the working access token, refresh token, tenantId, and userId in the environment. Repeated failures can trigger IP-based throttling and account lockout with HTTP 429.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{ownerEmail}}\",\n  \"password\": \"{{ownerPassword}}\"\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/auth/login"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Login succeeded', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "if (json.success && json.data) {",
+                  "  pm.environment.set('accessToken', json.data.accessToken || '');",
+                  "  pm.environment.set('refreshToken', json.data.refreshToken || '');",
+                  "  pm.environment.set('ownerAccessToken', json.data.accessToken || '');",
+                  "  pm.environment.set('ownerRefreshToken', json.data.refreshToken || '');",
+                  "  pm.environment.set('tenantId', json.data.user?.tenantId || pm.environment.get('tenantId') || '');",
+                  "  pm.environment.set('userId', json.data.user?._id || '');",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Current User",
+          "request": {
+            "method": "GET",
+            "description": "Returns the current authenticated user with populated role metadata. Requires a valid Bearer access token.",
+            "url": "{{baseUrl}}/api/v1/auth/me"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Current user loaded', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "if (json.success && json.data?.user) {",
+                  "  pm.environment.set('userId', json.data.user._id || '');",
+                  "  pm.environment.set('tenantId', json.data.user.tenantId || pm.environment.get('tenantId') || '');",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Refresh Tokens",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "Exchanges a valid refresh token for a new access/refresh pair. The previous refresh token is revoked as part of the operation, so always use the latest stored refresh token.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refreshToken\": \"{{refreshToken}}\"\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/auth/refresh"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Refresh succeeded', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "if (json.success && json.data) {",
+                  "  pm.environment.set('accessToken', json.data.accessToken || '');",
+                  "  pm.environment.set('refreshToken', json.data.refreshToken || '');",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "Requires a valid access token. The request body may omit refreshToken, but supplying the current refreshToken revokes it immediately. Successful responses clear the working tokens in this collection.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refreshToken\": \"{{refreshToken}}\"\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/auth/logout"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  pm.environment.unset('accessToken');",
+                  "  pm.environment.unset('refreshToken');",
+                  "}",
+                  "pm.test('Logout returned a valid response', function () {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 401]);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Forgot Password",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "Requests a password reset token for an active account. The response is intentionally generic. A reset token is only exposed when EXPOSE_EMAIL_ACTION_TOKENS=true; otherwise the route is present but the token is not returned by the API.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{ownerEmail}}\"\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/auth/forgot-password"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Forgot password returned a supported response', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "const token = json?.data?.passwordReset?.token;",
+                  "if (token) {",
+                  "  pm.environment.set('resetToken', token);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Reset Password",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "Completes a password reset with a valid one-time token. In this codebase the reset flow is only directly testable through the API when EXPOSE_EMAIL_ACTION_TOKENS=true or when you source the token from persistence out of band.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"{{resetToken}}\",\n  \"password\": \"{{ownerPassword}}\"\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/auth/reset-password"
+          }
+        },
+        {
+          "name": "Accept Invite",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "Accepts the invitation token created by POST /users/invite, activates the invited account, and returns access and refresh tokens for that user. This request stores the invited-user token pair separately so it does not overwrite the owner session by default.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"{{inviteToken}}\",\n  \"password\": \"{{inviteePassword}}\",\n  \"name\": \"{{inviteeName}}\",\n  \"language\": \"{{language}}\"\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/auth/accept-invite"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Invite acceptance succeeded', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "if (json.success && json.data) {",
+                  "  pm.environment.set('inviteeAccessToken', json.data.accessToken || '');",
+                  "  pm.environment.set('inviteeRefreshToken', json.data.refreshToken || '');",
+                  "  pm.environment.set('targetUserId', json.data.user?._id || pm.environment.get('targetUserId') || '');",
+                  "}"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Tenant",
+      "description": "Tenant profile and setup endpoints. These routes rely on service-layer allowed fields rather than Zod request schemas, so the collection only sends fields that the current implementation actually persists.",
+      "item": [
+        {
+          "name": "Get Tenant Details",
+          "request": {
+            "method": "GET",
+            "description": "Returns the current tenant document. Auth required; permission tenant:read. Supported for owner, admin, and accountant roles.",
+            "url": "{{baseUrl}}/api/v1/tenants"
+          }
+        },
+        {
+          "name": "Update Tenant Settings",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "Updates tenant-level display and identity settings. Auth required; permission tenant:update. Supported fields are name, legalName, taxId, logoUrl, industry, fiscalYearStartMonth, and settings.dateFormat, settings.numberFormat, settings.language. Unknown fields are ignored by the service.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"{{companyName}}\",\n  \"legalName\": \"{{companyName}} LLC\",\n  \"taxId\": \"EG-123456789\",\n  \"logoUrl\": \"https://example.com/logo.png\",\n  \"industry\": \"professional-services\",\n  \"fiscalYearStartMonth\": 1,\n  \"settings\": {\n    \"dateFormat\": \"DD/MM/YYYY\",\n    \"numberFormat\": \"en-US\",\n    \"language\": \"{{language}}\"\n  }\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/tenants/settings"
+          }
+        },
+        {
+          "name": "Complete Tenant Setup",
+          "request": {
+            "method": "POST",
+            "description": "Marks setupCompleted=true for the current tenant. Auth required; permission tenant:update. Use this after your initial tenant settings, chart of accounts, and fiscal periods are in place.",
+            "url": "{{baseUrl}}/api/v1/tenants/complete-setup"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Accounts",
+      "description": "Chart-of-accounts endpoints. Apply the Egyptian template once immediately after registration if you want the seeded accounting structure used by the rest of the collection. Manual account creation is supported, but journal posting requires active non-parent accounts.",
+      "item": [
+        {
+          "name": "Apply Egyptian Chart Of Accounts Template",
+          "request": {
+            "method": "POST",
+            "description": "Seeds the built-in Egyptian chart of accounts for the current tenant. Auth required; permission account:create. This can only be executed once while the tenant still has zero accounts; otherwise the service returns 400.",
+            "url": "{{baseUrl}}/api/v1/accounts/template"
+          }
+        },
+        {
+          "name": "List Accounts",
+          "request": {
+            "method": "GET",
+            "description": "Returns a paginated flat account list. Auth required; permission account:read. Supported query params are page, limit, type, isActive, and search; these are service-driven rather than route-validated.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/accounts?page=1&limit=50&type=asset&isActive=true&search=111",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "accounts"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                },
+                {
+                  "key": "type",
+                  "value": "asset",
+                  "disabled": true
+                },
+                {
+                  "key": "isActive",
+                  "value": "true",
+                  "disabled": true
+                },
+                {
+                  "key": "search",
+                  "value": "111",
+                  "disabled": true
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.success && Array.isArray(json.data) && json.data.length > 0) {",
+                  "  pm.environment.set('accountId', json.data[0]._id || '');",
+                  "  const byCode = Object.fromEntries(json.data.map((account) => [account.code, account]));",
+                  "  if (byCode['1111']?._id) pm.environment.set('cashAccountId', byCode['1111']._id);",
+                  "  if (byCode['4100']?._id) pm.environment.set('revenueAccountId', byCode['4100']._id);",
+                  "  if (byCode['5200']?._id) pm.environment.set('expenseAccountId', byCode['5200']._id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Account Tree",
+          "request": {
+            "method": "GET",
+            "description": "Returns the current tenant chart of accounts as a hierarchy. Auth required; permission account:read.",
+            "url": "{{baseUrl}}/api/v1/accounts/tree"
+          }
+        },
+        {
+          "name": "Get Account By Id",
+          "request": {
+            "method": "GET",
+            "description": "Returns a single account by id. Auth required; permission account:read. This route does not use Zod param validation, so malformed ids typically fail with 400 INVALID_ID and unknown ids return 404.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/accounts/:id",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "accounts",
+                ":id"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "{{accountId}}",
+                  "description": "Account _id from the active tenant."
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.success && json.data?.account?._id) {",
+                  "  pm.environment.set('accountId', json.data.account._id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create Account",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "Creates a tenant-scoped account. Auth required; permission account:create. code, nameAr, nameEn, and type are required; nature is optional and defaults from the type. parentId must reference an account of the same type and the maximum depth is six levels.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"9{{$timestamp}}\",\n  \"nameAr\": \"test-manual-account\",\n  \"nameEn\": \"Test Manual Account\",\n  \"type\": \"asset\",\n  \"isParentOnly\": false\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/accounts"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.success && json.data?.account?._id) {",
+                  "  pm.environment.set('accountId', json.data.account._id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update Account",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "Updates mutable account fields. Auth required; permission account:update. systemAccount records cannot be modified, parent changes must stay acyclic and same-type, and invalid parent ids fail in the service.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"nameAr\": \"test-manual-account-updated\",\n  \"nameEn\": \"Test Manual Account Updated\",\n  \"isActive\": true,\n  \"isParentOnly\": false\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/accounts/:id",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "accounts",
+                ":id"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "{{accountId}}"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Delete Account",
+          "request": {
+            "method": "DELETE",
+            "description": "Soft-deletes an account. Auth required; permission account:delete. Only non-system leaf accounts with no journal usage can be deleted; accounts with children or historical journal lines are rejected.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/accounts/:id",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "accounts",
+                ":id"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "{{accountId}}"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Fiscal Periods",
+      "description": "Fiscal timeline management. Journal creation, updates, posting, and deletion all depend on the relevant period being open. These routes use strict Zod schemas, so unexpected or malformed params return 422.",
+      "item": [
+        {
+          "name": "Create Fiscal Year",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "Creates twelve monthly periods for the supplied fiscal year. Auth required; permission fiscal:create. startMonth is optional and defaults from existing periods or the tenant fiscalYearStartMonth. The service rejects duplicate years, overlaps, and gaps.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"year\": {{fiscalYear}},\n  \"startMonth\": {{fiscalStartMonth}}\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/fiscal-periods"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.success && Array.isArray(json.data?.periods) && json.data.periods.length > 0) {",
+                  "  pm.environment.set('fiscalPeriodId', json.data.periods[0]._id || '');",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Fiscal Periods",
+          "request": {
+            "method": "GET",
+            "description": "Returns fiscal periods for the current tenant, optionally filtered by fiscal year. Auth required; permission fiscal:read.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/fiscal-periods?year={{fiscalYear}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "fiscal-periods"
+              ],
+              "query": [
+                {
+                  "key": "year",
+                  "value": "{{fiscalYear}}",
+                  "disabled": true
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.success && Array.isArray(json.data) && json.data.length > 0) {",
+                  "  pm.environment.set('fiscalPeriodId', json.data[0]._id || '');",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Fiscal Period By Id",
+          "request": {
+            "method": "GET",
+            "description": "Returns a single fiscal period by id. Auth required; permission fiscal:read. Invalid ids are rejected at validation time with 422.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/fiscal-periods/:id",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "fiscal-periods",
+                ":id"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "{{fiscalPeriodId}}"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Close Fiscal Period",
+          "request": {
+            "method": "POST",
+            "description": "Transitions an open period to closed. Auth required; permission fiscal:update. Closed periods can be reopened later, but locked periods cannot.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/fiscal-periods/:id/close",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "fiscal-periods",
+                ":id",
+                "close"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "{{fiscalPeriodId}}"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Lock Fiscal Period",
+          "request": {
+            "method": "POST",
+            "description": "Locks a fiscal period. Auth required; permission fiscal:lock. Locked periods are irreversible through normal reopen flow and journal operations are blocked.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/fiscal-periods/:id/lock",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "fiscal-periods",
+                ":id",
+                "lock"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "{{fiscalPeriodId}}"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Reopen Fiscal Period",
+          "request": {
+            "method": "POST",
+            "description": "Reopens a previously closed period. Auth required; permission fiscal:update. Locked periods cannot be reopened and open periods return 400.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/fiscal-periods/:id/reopen",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "fiscal-periods",
+                ":id",
+                "reopen"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "{{fiscalPeriodId}}"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Journal Entries",
+      "description": "Double-entry journal workflows. Every write requires an open fiscal period and active non-parent accounts. Draft entries can be updated or deleted; posted entries are immutable and must be reversed instead.",
+      "item": [
+        {
+          "name": "Create Draft Entry",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "Creates a draft journal entry. Auth required; permission journal:create. Body validation enforces at least two lines, balanced debits and credits, valid date, and decimal strings up to six places. Requires open fiscal period and active non-parent accounts.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"date\": \"{{reportStartDate}}T12:00:00.000Z\",\n  \"description\": \"Manual revenue entry\",\n  \"reference\": \"INV-1001\",\n  \"lines\": [\n    {\n      \"accountId\": \"{{cashAccountId}}\",\n      \"debit\": \"1500.00\",\n      \"credit\": \"0\",\n      \"description\": \"Cash receipt\"\n    },\n    {\n      \"accountId\": \"{{revenueAccountId}}\",\n      \"debit\": \"0\",\n      \"credit\": \"1500.00\",\n      \"description\": \"Revenue recognition\"\n    }\n  ]\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/journal-entries"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.success && json.data?.entry?._id) {",
+                  "  pm.environment.set('journalId', json.data.entry._id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Journal Entries",
+          "request": {
+            "method": "GET",
+            "description": "Returns paginated draft and posted journal entries. Auth required; permission journal:read. Supported query params are page, limit, startDate, endDate, accountId, status, and search.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/journal-entries?page=1&limit=20&startDate={{reportStartDate}}&endDate={{reportEndDate}}&accountId={{cashAccountId}}&status=draft&search=INV",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "journal-entries"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "20"
+                },
+                {
+                  "key": "startDate",
+                  "value": "{{reportStartDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "endDate",
+                  "value": "{{reportEndDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "accountId",
+                  "value": "{{cashAccountId}}",
+                  "disabled": true
+                },
+                {
+                  "key": "status",
+                  "value": "draft",
+                  "disabled": true
+                },
+                {
+                  "key": "search",
+                  "value": "INV",
+                  "disabled": true
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.success && Array.isArray(json.data) && json.data.length > 0) {",
+                  "  pm.environment.set('journalId', json.data[0]._id || '');",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Journal Entry By Id",
+          "request": {
+            "method": "GET",
+            "description": "Returns a single journal entry with createdBy, postedBy, and line account details populated. Auth required; permission journal:read.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/journal-entries/:id",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "journal-entries",
+                ":id"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "{{journalId}}"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Update Draft Entry",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "Updates a draft journal entry. Auth required; permission journal:update. Only draft entries are mutable; posted entries return 400. You can change description, reference, date, and lines, but date changes still require an open fiscal period.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"description\": \"Manual revenue entry updated\",\n  \"reference\": \"INV-1001-UPDATED\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/journal-entries/:id",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "journal-entries",
+                ":id"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "{{journalId}}"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Post Draft Entry",
+          "request": {
+            "method": "POST",
+            "description": "Posts a draft journal entry and makes it immutable. Auth required; permission journal:post. The service revalidates balance and requires the fiscal period to still be open.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/journal-entries/:id/post",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "journal-entries",
+                ":id",
+                "post"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "{{journalId}}"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Reverse Posted Entry",
+          "request": {
+            "method": "POST",
+            "description": "Creates a posted reversing entry for an existing posted journal entry. Auth required; permission journal:create. Entries can only be reversed once and the reversal is dated at the current server time in an open fiscal period.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/journal-entries/:id/reverse",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "journal-entries",
+                ":id",
+                "reverse"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "{{journalId}}"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.success && json.data?.entry?._id) {",
+                  "  pm.environment.set('reversalJournalId', json.data.entry._id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Export Journal Entries CSV",
+          "request": {
+            "method": "GET",
+            "description": "Exports journal entries as CSV. Auth required; permission report:export. Supported filters are startDate, endDate, accountId, and status; search is not supported on the export route.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/journal-entries/export?startDate={{reportStartDate}}&endDate={{reportEndDate}}&accountId={{cashAccountId}}&status=posted",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "journal-entries",
+                "export"
+              ],
+              "query": [
+                {
+                  "key": "startDate",
+                  "value": "{{reportStartDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "endDate",
+                  "value": "{{reportEndDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "accountId",
+                  "value": "{{cashAccountId}}",
+                  "disabled": true
+                },
+                {
+                  "key": "status",
+                  "value": "posted",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Delete Draft Entry",
+          "request": {
+            "method": "DELETE",
+            "description": "Soft-deletes a draft journal entry. Auth required; permission journal:delete. Posted entries cannot be deleted and must be reversed instead, so use this before posting or against a separate draft id.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/journal-entries/:id",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "journal-entries",
+                ":id"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "{{journalId}}"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Ledger",
+      "description": "Read-only ledger views derived from posted journal entries. These endpoints only include posted, non-deleted journal data and support date-based filtering. Use List Accounts first to populate account ids for the account-specific routes.",
+      "item": [
+        {
+          "name": "Get All Accounts Ledger",
+          "request": {
+            "method": "GET",
+            "description": "Returns a paginated tenant-wide ledger view across all accounts. Auth required; permission report:view. Query validation is strict and only accepts startDate, endDate, page, and limit.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ledger?page=1&limit=20&startDate={{reportStartDate}}&endDate={{reportEndDate}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ledger"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "20"
+                },
+                {
+                  "key": "startDate",
+                  "value": "{{reportStartDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "endDate",
+                  "value": "{{reportEndDate}}",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get Account Ledger",
+          "request": {
+            "method": "GET",
+            "description": "Returns the running-balance ledger for a single account. Auth required; permission report:view. Use a valid account ObjectId such as cashAccountId from the seeded chart of accounts.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ledger/:accountId?page=1&limit=20&startDate={{reportStartDate}}&endDate={{reportEndDate}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ledger",
+                ":accountId"
+              ],
+              "variable": [
+                {
+                  "key": "accountId",
+                  "value": "{{cashAccountId}}"
+                }
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "20"
+                },
+                {
+                  "key": "startDate",
+                  "value": "{{reportStartDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "endDate",
+                  "value": "{{reportEndDate}}",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Export Account Ledger",
+          "request": {
+            "method": "GET",
+            "description": "Exports a single-account ledger as CSV. Auth required; permission report:export. Only startDate and endDate are supported on the export route.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/ledger/:accountId/export?startDate={{reportStartDate}}&endDate={{reportEndDate}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ledger",
+                ":accountId",
+                "export"
+              ],
+              "variable": [
+                {
+                  "key": "accountId",
+                  "value": "{{cashAccountId}}"
+                }
+              ],
+              "query": [
+                {
+                  "key": "startDate",
+                  "value": "{{reportStartDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "endDate",
+                  "value": "{{reportEndDate}}",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Reports",
+      "description": "Financial reporting and export endpoints. These routes are strictly validated, reject unexpected query params with 422, and support a refresh flag to bypass Redis-backed report caching when enabled.",
+      "item": [
+        {
+          "name": "Trial Balance",
+          "request": {
+            "method": "GET",
+            "description": "Returns the trial balance for an optional date range. Auth required; permission report:view. compareStartDate and compareEndDate must be supplied together if used; refresh=true bypasses the cache.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/reports/trial-balance?startDate={{reportStartDate}}&endDate={{reportEndDate}}&compareStartDate={{compareStartDate}}&compareEndDate={{compareEndDate}}&refresh=false",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "reports",
+                "trial-balance"
+              ],
+              "query": [
+                {
+                  "key": "startDate",
+                  "value": "{{reportStartDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "endDate",
+                  "value": "{{reportEndDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "compareStartDate",
+                  "value": "{{compareStartDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "compareEndDate",
+                  "value": "{{compareEndDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "refresh",
+                  "value": "false",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Income Statement",
+          "request": {
+            "method": "GET",
+            "description": "Returns the income statement for a required date range. Auth required; permission report:view. startDate and endDate are mandatory and comparison dates must be supplied as a pair.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/reports/income-statement?startDate={{reportStartDate}}&endDate={{reportEndDate}}&compareStartDate={{compareStartDate}}&compareEndDate={{compareEndDate}}&refresh=false",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "reports",
+                "income-statement"
+              ],
+              "query": [
+                {
+                  "key": "startDate",
+                  "value": "{{reportStartDate}}"
+                },
+                {
+                  "key": "endDate",
+                  "value": "{{reportEndDate}}"
+                },
+                {
+                  "key": "compareStartDate",
+                  "value": "{{compareStartDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "compareEndDate",
+                  "value": "{{compareEndDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "refresh",
+                  "value": "false",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Balance Sheet",
+          "request": {
+            "method": "GET",
+            "description": "Returns the balance sheet as of a specific date. Auth required; permission report:view. compareAsOfDate is optional. The response includes yearClose metadata that highlights pending prior-year closures.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/reports/balance-sheet?asOfDate={{balanceSheetAsOfDate}}&compareAsOfDate={{compareBalanceSheetAsOfDate}}&refresh=false",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "reports",
+                "balance-sheet"
+              ],
+              "query": [
+                {
+                  "key": "asOfDate",
+                  "value": "{{balanceSheetAsOfDate}}"
+                },
+                {
+                  "key": "compareAsOfDate",
+                  "value": "{{compareBalanceSheetAsOfDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "refresh",
+                  "value": "false",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Cash Flow Statement",
+          "request": {
+            "method": "GET",
+            "description": "Returns the indirect cash flow statement for a required date range. Auth required; permission report:view. Comparison date pairs are optional, and the service derives operating, investing, financing, and reconciling sections from posted entries.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/reports/cash-flow?startDate={{reportStartDate}}&endDate={{reportEndDate}}&compareStartDate={{compareStartDate}}&compareEndDate={{compareEndDate}}&refresh=false",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "reports",
+                "cash-flow"
+              ],
+              "query": [
+                {
+                  "key": "startDate",
+                  "value": "{{reportStartDate}}"
+                },
+                {
+                  "key": "endDate",
+                  "value": "{{reportEndDate}}"
+                },
+                {
+                  "key": "compareStartDate",
+                  "value": "{{compareStartDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "compareEndDate",
+                  "value": "{{compareEndDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "refresh",
+                  "value": "false",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Export Trial Balance",
+          "request": {
+            "method": "GET",
+            "description": "Exports the trial balance. Auth required; permission report:export. format accepts csv, excel, or pdf and defaults to csv. Postman will download the response as a file.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/reports/trial-balance/export?startDate={{reportStartDate}}&endDate={{reportEndDate}}&compareStartDate={{compareStartDate}}&compareEndDate={{compareEndDate}}&refresh=false&format=csv",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "reports",
+                "trial-balance",
+                "export"
+              ],
+              "query": [
+                {
+                  "key": "startDate",
+                  "value": "{{reportStartDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "endDate",
+                  "value": "{{reportEndDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "compareStartDate",
+                  "value": "{{compareStartDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "compareEndDate",
+                  "value": "{{compareEndDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "refresh",
+                  "value": "false",
+                  "disabled": true
+                },
+                {
+                  "key": "format",
+                  "value": "csv"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Export Income Statement",
+          "request": {
+            "method": "GET",
+            "description": "Exports the income statement. Auth required; permission report:export. Change format to excel or pdf to exercise the alternative export types implemented by the backend.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/reports/income-statement/export?startDate={{reportStartDate}}&endDate={{reportEndDate}}&compareStartDate={{compareStartDate}}&compareEndDate={{compareEndDate}}&refresh=false&format=csv",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "reports",
+                "income-statement",
+                "export"
+              ],
+              "query": [
+                {
+                  "key": "startDate",
+                  "value": "{{reportStartDate}}"
+                },
+                {
+                  "key": "endDate",
+                  "value": "{{reportEndDate}}"
+                },
+                {
+                  "key": "compareStartDate",
+                  "value": "{{compareStartDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "compareEndDate",
+                  "value": "{{compareEndDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "refresh",
+                  "value": "false",
+                  "disabled": true
+                },
+                {
+                  "key": "format",
+                  "value": "csv"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Export Balance Sheet",
+          "request": {
+            "method": "GET",
+            "description": "Exports the balance sheet as a downloadable file. Auth required; permission report:export. Supported formats are csv, excel, and pdf.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/reports/balance-sheet/export?asOfDate={{balanceSheetAsOfDate}}&compareAsOfDate={{compareBalanceSheetAsOfDate}}&refresh=false&format=csv",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "reports",
+                "balance-sheet",
+                "export"
+              ],
+              "query": [
+                {
+                  "key": "asOfDate",
+                  "value": "{{balanceSheetAsOfDate}}"
+                },
+                {
+                  "key": "compareAsOfDate",
+                  "value": "{{compareBalanceSheetAsOfDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "refresh",
+                  "value": "false",
+                  "disabled": true
+                },
+                {
+                  "key": "format",
+                  "value": "csv"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Export Cash Flow Statement",
+          "request": {
+            "method": "GET",
+            "description": "Exports the cash flow statement. Auth required; permission report:export. The backend explicitly supports csv, excel, and pdf for this route.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/reports/cash-flow/export?startDate={{reportStartDate}}&endDate={{reportEndDate}}&compareStartDate={{compareStartDate}}&compareEndDate={{compareEndDate}}&refresh=false&format=csv",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "reports",
+                "cash-flow",
+                "export"
+              ],
+              "query": [
+                {
+                  "key": "startDate",
+                  "value": "{{reportStartDate}}"
+                },
+                {
+                  "key": "endDate",
+                  "value": "{{reportEndDate}}"
+                },
+                {
+                  "key": "compareStartDate",
+                  "value": "{{compareStartDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "compareEndDate",
+                  "value": "{{compareEndDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "refresh",
+                  "value": "false",
+                  "disabled": true
+                },
+                {
+                  "key": "format",
+                  "value": "csv"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Dashboard",
+      "description": "Tenant dashboard summary and recent journal statistics derived from current posted and draft activity.",
+      "item": [
+        {
+          "name": "Get Dashboard Summary",
+          "request": {
+            "method": "GET",
+            "description": "Returns aggregate financial totals plus entry statistics for the current tenant. Auth required; permission dashboard:view.",
+            "url": "{{baseUrl}}/api/v1/dashboard"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Users",
+      "description": "Tenant-scoped user management. Invite returns the one-time invitation token directly because outbound email is not implemented in this backend. Role-change and deactivation operations enforce hierarchy rules and protect the last owner.",
+      "item": [
+        {
+          "name": "List Users",
+          "request": {
+            "method": "GET",
+            "description": "Returns a paginated user list for the current tenant. Auth required; permission user:read. Supported query params are page and limit.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users?page=1&limit=20",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "users"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "20"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "const currentUserId = pm.environment.get('userId');",
+                  "if (json.success && Array.isArray(json.data)) {",
+                  "  const target = json.data.find((user) => user._id && user._id !== currentUserId);",
+                  "  if (target?._id) {",
+                  "    pm.environment.set('targetUserId', target._id);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get My Profile",
+          "request": {
+            "method": "GET",
+            "description": "Returns the current authenticated user profile without requiring a separate RBAC permission beyond authentication. Useful for verifying the active token context.",
+            "url": "{{baseUrl}}/api/v1/users/profile"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.success && json.data?.user?._id) {",
+                  "  pm.environment.set('userId', json.data.user._id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Update My Profile",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "Updates the current user's profile. Auth required. Allowed body fields are name and language.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"{{ownerName}} Updated\",\n  \"language\": \"{{language}}\"\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/users/profile"
+          }
+        },
+        {
+          "name": "Get User By Id",
+          "request": {
+            "method": "GET",
+            "description": "Returns another user in the same tenant. Auth required; permission user:read. Use Invite User or List Users first to populate targetUserId.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users/:id",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "users",
+                ":id"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "{{targetUserId}}"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Invite User",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "Invites a new tenant user and returns the one-time invitation token and acceptUrl directly. Auth required; permission user:invite. roleName is limited by validation to admin or accountant.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{inviteeEmail}}\",\n  \"name\": \"{{inviteeName}}\",\n  \"roleName\": \"{{inviteeRoleName}}\"\n}"
+            },
+            "url": "{{baseUrl}}/api/v1/users/invite"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const currentInviteeEmail = pm.environment.get('inviteeEmail');",
+                  "if (!currentInviteeEmail || currentInviteeEmail === 'invitee@example.com') {",
+                  "  pm.environment.set('inviteeEmail', `invitee.${Date.now()}@example.com`);",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.success && json.data) {",
+                  "  if (json.data.invitation?.token) pm.environment.set('inviteToken', json.data.invitation.token);",
+                  "  if (json.data.user?._id) pm.environment.set('targetUserId', json.data.user._id);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Change User Role",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "description": "Changes another user's role. Auth required; permission user:update. Cannot change your own role, cannot assign an equal or higher role than your own, and cannot demote the last active owner.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"roleName\": \"accountant\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users/:id/role",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "users",
+                ":id",
+                "role"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "{{targetUserId}}"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Deactivate User",
+          "request": {
+            "method": "PATCH",
+            "description": "Deactivates another user. Auth required; permission user:deactivate. The service prevents self-deactivation and prevents deactivation of the last active owner.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/users/:id/deactivate",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "users",
+                ":id",
+                "deactivate"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "{{targetUserId}}"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Audit Logs",
+      "description": "Read-only audit trail queries. Audit records are append-only in the application layer and this module only exposes a list endpoint for filtering and pagination.",
+      "item": [
+        {
+          "name": "List Audit Logs",
+          "request": {
+            "method": "GET",
+            "description": "Returns paginated audit log entries for the current tenant. Auth required; permission audit:read. Supported query params are page, limit, action, resourceType, resourceId, userId, startDate, and endDate.",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/audit-logs?page=1&limit=20&action=journal_entry.created&resourceType=JournalEntry&resourceId={{journalId}}&userId={{userId}}&startDate={{reportStartDate}}&endDate={{reportEndDate}}",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "audit-logs"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "limit",
+                  "value": "20"
+                },
+                {
+                  "key": "action",
+                  "value": "journal_entry.created",
+                  "disabled": true
+                },
+                {
+                  "key": "resourceType",
+                  "value": "JournalEntry",
+                  "disabled": true
+                },
+                {
+                  "key": "resourceId",
+                  "value": "{{journalId}}",
+                  "disabled": true
+                },
+                {
+                  "key": "userId",
+                  "value": "{{userId}}",
+                  "disabled": true
+                },
+                {
+                  "key": "startDate",
+                  "value": "{{reportStartDate}}",
+                  "disabled": true
+                },
+                {
+                  "key": "endDate",
+                  "value": "{{reportEndDate}}",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

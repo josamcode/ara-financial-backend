@@ -1,0 +1,987 @@
+'use strict';
+
+const crypto = require('crypto');
+const mongoose = require('mongoose');
+const config = require('../../config');
+const logger = require('../../config/logger');
+const { getRedisClient } = require('../../config/redis');
+const { JournalEntry } = require('../journal/journal.model');
+const { Account } = require('../account/account.model');
+const { FiscalPeriod } = require('../fiscal-period/fiscalPeriod.model');
+const fiscalPeriodService = require('../fiscal-period/fiscalPeriod.service');
+const { BadRequestError } = require('../../common/errors');
+const {
+  toScaledInteger,
+  formatScaledInteger,
+} = require('../../common/utils/money');
+
+const REPORT_CACHE_PREFIX = 'report:';
+const CURRENT_YEAR_EARNINGS_CODE = '3300';
+const RETAINED_EARNINGS_CODE = '3200';
+const CASH_ACCOUNT_PREFIXES = ['111'];
+
+const WORKING_CAPITAL_RULES = Object.freeze([
+  { code: '1120', label: 'Accounts Receivable', section: 'operating', multiplier: -1n },
+  { code: '1130', label: 'Inventory', section: 'operating', multiplier: -1n },
+  { code: '1140', label: 'Prepaid Expenses', section: 'operating', multiplier: -1n },
+  { code: '2110', label: 'Accounts Payable', section: 'operating', multiplier: 1n },
+  { code: '2120', label: 'Accrued Expenses', section: 'operating', multiplier: 1n },
+  { code: '2130', label: 'Unearned Revenue', section: 'operating', multiplier: 1n },
+  { code: '2140', label: 'VAT Payable', section: 'operating', multiplier: 1n },
+]);
+
+function toObjectId(value) {
+  return new mongoose.Types.ObjectId(value);
+}
+
+function hashValue(value) {
+  return crypto.createHash('sha1').update(JSON.stringify(value)).digest('hex');
+}
+
+function isValidDate(date) {
+  return date instanceof Date && !Number.isNaN(date.getTime());
+}
+
+function isDateOnlyInput(value) {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value.trim());
+}
+
+function isMidnightUtcTimestampInput(value) {
+  return (
+    typeof value === 'string' &&
+    /^\d{4}-\d{2}-\d{2}T00:00:00(?:\.000)?Z$/.test(value.trim())
+  );
+}
+
+function toIsoString(date) {
+  return date.toISOString();
+}
+
+function toPeriodRange(startDate, endDate) {
+  return {
+    startDate: toIsoString(startDate),
+    endDate: toIsoString(endDate),
+  };
+}
+
+class ReportService {
+  async getTrialBalance(tenantId, params = {}) {
+    const primaryParams = this._normalizeTrialBalanceParams(params);
+    const report = await this._getTrialBalanceReport(tenantId, primaryParams);
+
+    if (!primaryParams.compare) {
+      return report;
+    }
+
+    const comparison = await this._getTrialBalanceReport(tenantId, primaryParams.compare);
+    return this._attachComparison(report, comparison, {
+      entryFields: [{ key: 'balance', comparisonKey: 'comparisonBalance', deltaKey: 'deltaBalance' }],
+      totalsFields: ['totalDebits', 'totalCredits', 'difference'],
+      collectionKeys: ['accounts'],
+      comparisonPeriodKey: 'period',
+    });
+  }
+
+  async getIncomeStatement(tenantId, params = {}) {
+    const primaryParams = this._normalizeRequiredRangeParams(params, 'Income Statement');
+    const report = await this._getIncomeStatementReport(tenantId, primaryParams);
+
+    if (!primaryParams.compare) {
+      return report;
+    }
+
+    const comparison = await this._getIncomeStatementReport(tenantId, primaryParams.compare);
+    return this._attachComparison(report, comparison, {
+      entryFields: [{ key: 'balance', comparisonKey: 'comparisonBalance', deltaKey: 'deltaBalance' }],
+      totalsFields: ['totalRevenue', 'totalExpenses', 'netIncome'],
+      collectionKeys: ['revenue', 'expenses'],
+      comparisonPeriodKey: 'period',
+    });
+  }
+
+  async getBalanceSheet(tenantId, params = {}) {
+    const primaryParams = this._normalizeAsOfParams(params);
+    const report = await this._getBalanceSheetReport(tenantId, primaryParams);
+
+    if (!primaryParams.compare) {
+      return report;
+    }
+
+    const comparison = await this._getBalanceSheetReport(tenantId, primaryParams.compare);
+    return this._attachComparison(report, comparison, {
+      entryFields: [{ key: 'balance', comparisonKey: 'comparisonBalance', deltaKey: 'deltaBalance' }],
+      totalsFields: ['totalAssets', 'totalLiabilities', 'totalEquity', 'totalLiabilitiesAndEquity'],
+      collectionKeys: ['assets', 'liabilities', 'equity'],
+      comparisonPeriodKey: 'asOfDate',
+    });
+  }
+
+  async getCashFlowStatement(tenantId, params = {}) {
+    const primaryParams = this._normalizeRequiredRangeParams(params, 'Cash Flow Statement');
+    const report = await this._getCashFlowReport(tenantId, primaryParams);
+
+    if (!primaryParams.compare) {
+      return report;
+    }
+
+    const comparison = await this._getCashFlowReport(tenantId, primaryParams.compare);
+    return this._attachComparison(report, comparison, {
+      entryFields: [{ key: 'amount', comparisonKey: 'comparisonAmount', deltaKey: 'deltaAmount' }],
+      totalsFields: [
+        'operatingCashFlow',
+        'investingCashFlow',
+        'financingCashFlow',
+        'reconcilingDifference',
+        'netIncreaseInCash',
+        'openingCash',
+        'closingCash',
+      ],
+      collectionKeys: ['operating', 'investing', 'financing', 'reconcilingItems'],
+      comparisonPeriodKey: 'period',
+    });
+  }
+
+  async _getTrialBalanceReport(tenantId, params) {
+    return this._getCachedReport('trial-balance', tenantId, params, async () => {
+      const matchStage = {
+        tenantId: toObjectId(tenantId),
+        status: 'posted',
+        deletedAt: null,
+      };
+
+      if (params.startDate || params.endDate) {
+        matchStage.date = {};
+        if (params.startDate) matchStage.date.$gte = params.startDate;
+        if (params.endDate) matchStage.date.$lte = params.endDate;
+      }
+
+      const pipeline = [
+        { $match: matchStage },
+        { $unwind: '$lines' },
+        {
+          $group: {
+            _id: '$lines.accountId',
+            totalDebit: { $sum: '$lines.debit' },
+            totalCredit: { $sum: '$lines.credit' },
+          },
+        },
+        {
+          $lookup: {
+            from: 'accounts',
+            localField: '_id',
+            foreignField: '_id',
+            as: 'account',
+          },
+        },
+        { $unwind: '$account' },
+        {
+          $project: {
+            accountId: '$_id',
+            code: '$account.code',
+            nameAr: '$account.nameAr',
+            nameEn: '$account.nameEn',
+            type: '$account.type',
+            nature: '$account.nature',
+            totalDebit: { $toString: '$totalDebit' },
+            totalCredit: { $toString: '$totalCredit' },
+            balance: {
+              $toString: { $subtract: ['$totalDebit', '$totalCredit'] },
+            },
+          },
+        },
+        { $sort: { code: 1 } },
+      ];
+
+      const accounts = await JournalEntry.aggregate(pipeline);
+
+      let totalDebits = 0n;
+      let totalCredits = 0n;
+      for (const account of accounts) {
+        totalDebits += toScaledInteger(account.totalDebit);
+        totalCredits += toScaledInteger(account.totalCredit);
+      }
+
+      const difference = totalDebits - totalCredits;
+
+      return {
+        accounts,
+        totals: {
+          totalDebits: formatScaledInteger(totalDebits),
+          totalCredits: formatScaledInteger(totalCredits),
+          difference: formatScaledInteger(difference),
+          isBalanced: difference === 0n,
+        },
+        period: {
+          startDate: params.startDate ? toIsoString(params.startDate) : null,
+          endDate: params.endDate ? toIsoString(params.endDate) : null,
+        },
+      };
+    });
+  }
+
+  async _getIncomeStatementReport(tenantId, params) {
+    return this._getCachedReport('income-statement', tenantId, params, async () => {
+      const results = await this._aggregateIncomeStatementLines(
+        tenantId,
+        params.startDate,
+        params.endDate
+      );
+
+      const revenue = [];
+      const expenses = [];
+      let totalRevenue = 0n;
+      let totalExpenses = 0n;
+
+      for (const item of results) {
+        const debit = toScaledInteger(item.totalDebit);
+        const credit = toScaledInteger(item.totalCredit);
+        const balance = item._id.type === 'revenue'
+          ? credit - debit
+          : debit - credit;
+
+        const entry = {
+          accountId: item._id.accountId,
+          code: item._id.code,
+          nameAr: item._id.nameAr,
+          nameEn: item._id.nameEn,
+          balance: formatScaledInteger(balance),
+        };
+
+        if (item._id.type === 'revenue') {
+          revenue.push(entry);
+          totalRevenue += balance;
+        } else {
+          expenses.push(entry);
+          totalExpenses += balance;
+        }
+      }
+
+      const netIncome = totalRevenue - totalExpenses;
+
+      return {
+        revenue,
+        expenses,
+        totals: {
+          totalRevenue: formatScaledInteger(totalRevenue),
+          totalExpenses: formatScaledInteger(totalExpenses),
+          netIncome: formatScaledInteger(netIncome),
+          isProfit: netIncome >= 0n,
+        },
+        period: toPeriodRange(params.startDate, params.endDate),
+      };
+    });
+  }
+
+  async _getBalanceSheetReport(tenantId, params) {
+    return this._getCachedReport('balance-sheet', tenantId, params, async () => {
+      const [results, yearClose] = await Promise.all([
+        this._aggregateBalanceSnapshot(tenantId, params.asOfDate),
+        this._getYearCloseContext(tenantId, params.asOfDate),
+      ]);
+
+      const assets = [];
+      const liabilities = [];
+      const equity = [];
+      let totalAssets = 0n;
+      let totalLiabilities = 0n;
+      let totalEquity = 0n;
+
+      for (const item of results) {
+        const balance = toScaledInteger(item.balance);
+        const entry = {
+          accountId: item.accountId,
+          code: item.code,
+          nameAr: item.nameAr,
+          nameEn: item.nameEn,
+          balance: formatScaledInteger(balance),
+        };
+
+        if (item.type === 'asset') {
+          assets.push(entry);
+          totalAssets += balance;
+        } else if (item.type === 'liability') {
+          liabilities.push(entry);
+          totalLiabilities += balance;
+        } else {
+          equity.push(entry);
+          totalEquity += balance;
+        }
+      }
+
+      const currentYearEarnings = await this._getNetIncomeForDateRange(
+        tenantId,
+        yearClose.currentFiscalYear.startDate,
+        params.asOfDate
+      );
+
+      totalEquity = await this._applyCurrentYearEarnings(
+        tenantId,
+        equity,
+        totalEquity,
+        currentYearEarnings
+      );
+
+      const totalLiabilitiesAndEquity = totalLiabilities + totalEquity;
+
+      return {
+        assets,
+        liabilities,
+        equity,
+        totals: {
+          totalAssets: formatScaledInteger(totalAssets),
+          totalLiabilities: formatScaledInteger(totalLiabilities),
+          totalEquity: formatScaledInteger(totalEquity),
+          totalLiabilitiesAndEquity: formatScaledInteger(totalLiabilitiesAndEquity),
+          isBalanced: totalAssets === totalLiabilitiesAndEquity,
+        },
+        asOfDate: toIsoString(params.asOfDate),
+        yearClose: {
+          currentFiscalYear: yearClose.currentFiscalYear.year,
+          currentFiscalYearStartDate: toIsoString(yearClose.currentFiscalYear.startDate),
+          currentFiscalYearEndDate: toIsoString(yearClose.currentFiscalYear.endDate),
+          pendingPriorYearClosures: yearClose.pendingPriorYearClosures,
+          retainedEarningsAccountCode: RETAINED_EARNINGS_CODE,
+          currentYearEarningsAccountCode: CURRENT_YEAR_EARNINGS_CODE,
+          policy:
+            'Current year earnings are limited to the fiscal year containing the as-of date. ' +
+            'Prior fiscal years should be closed into retained earnings before final reporting.',
+        },
+      };
+    });
+  }
+
+  async _getCashFlowReport(tenantId, params) {
+    return this._getCachedReport('cash-flow', tenantId, params, async () => {
+      const periodIncome = await this._getIncomeStatementReport(tenantId, params);
+      const openingDate = new Date(params.startDate.getTime() - 1);
+      const [openingSnapshot, closingSnapshot] = await Promise.all([
+        this._aggregateBalanceSnapshot(tenantId, openingDate),
+        this._aggregateBalanceSnapshot(tenantId, params.endDate),
+      ]);
+
+      const openingMap = new Map(openingSnapshot.map((entry) => [entry.code, entry]));
+      const closingMap = new Map(closingSnapshot.map((entry) => [entry.code, entry]));
+
+      const operating = [];
+      const investing = [];
+      const financing = [];
+      const reconcilingItems = [];
+
+      let operatingCashFlow = 0n;
+      let investingCashFlow = 0n;
+      let financingCashFlow = 0n;
+
+      const netIncome = toScaledInteger(periodIncome.totals.netIncome);
+      operating.push({
+        code: 'OPERATING-NET-INCOME',
+        nameEn: 'Net income',
+        nameAr: 'صافي الربح',
+        amount: formatScaledInteger(netIncome),
+      });
+      operatingCashFlow += netIncome;
+
+      const depreciationAdjustment = periodIncome.expenses.find((entry) => entry.code === '5500');
+      if (depreciationAdjustment) {
+        const amount = toScaledInteger(depreciationAdjustment.balance);
+        operating.push({
+          code: 'OPERATING-DEPRECIATION',
+          nameEn: 'Add back depreciation',
+          nameAr: 'إضافة الإهلاك',
+          amount: formatScaledInteger(amount),
+        });
+        operatingCashFlow += amount;
+      }
+
+      for (const rule of WORKING_CAPITAL_RULES) {
+        const openingBalance = this._getSnapshotBalance(openingMap.get(rule.code));
+        const closingBalance = this._getSnapshotBalance(closingMap.get(rule.code));
+        const delta = closingBalance - openingBalance;
+        const cashImpact = delta * rule.multiplier;
+
+        if (cashImpact === 0n) {
+          continue;
+        }
+
+        operating.push({
+          code: `OPERATING-${rule.code}`,
+          nameEn: rule.label,
+          nameAr: rule.label,
+          amount: formatScaledInteger(cashImpact),
+        });
+        operatingCashFlow += cashImpact;
+      }
+
+      for (const entry of closingSnapshot) {
+        const openingBalance = this._getSnapshotBalance(openingMap.get(entry.code));
+        const closingBalance = this._getSnapshotBalance(entry);
+        const delta = closingBalance - openingBalance;
+
+        if (delta === 0n) {
+          continue;
+        }
+
+        if (this._isInvestingAccount(entry.code)) {
+          const cashImpact = -delta;
+          investing.push({
+            code: `INVESTING-${entry.code}`,
+            nameEn: entry.nameEn,
+            nameAr: entry.nameAr,
+            amount: formatScaledInteger(cashImpact),
+          });
+          investingCashFlow += cashImpact;
+        } else if (this._isFinancingAccount(entry.code)) {
+          const cashImpact = this._getFinancingCashImpact(entry.code, delta);
+          financing.push({
+            code: `FINANCING-${entry.code}`,
+            nameEn: entry.nameEn,
+            nameAr: entry.nameAr,
+            amount: formatScaledInteger(cashImpact),
+          });
+          financingCashFlow += cashImpact;
+        }
+      }
+
+      const openingCash = this._sumCashBalances(openingSnapshot);
+      const closingCash = this._sumCashBalances(closingSnapshot);
+      const actualNetIncreaseInCash = closingCash - openingCash;
+      const reportedNetIncrease = operatingCashFlow + investingCashFlow + financingCashFlow;
+      const reconcilingDifference = actualNetIncreaseInCash - reportedNetIncrease;
+
+      if (reconcilingDifference !== 0n) {
+        reconcilingItems.push({
+          code: 'RECONCILING-UNCLASSIFIED',
+          nameEn: 'Unclassified cash movements',
+          nameAr: 'حركات نقدية غير مصنفة',
+          amount: formatScaledInteger(reconcilingDifference),
+        });
+      }
+
+      return {
+        method: 'indirect',
+        operating,
+        investing,
+        financing,
+        reconcilingItems,
+        totals: {
+          operatingCashFlow: formatScaledInteger(operatingCashFlow),
+          investingCashFlow: formatScaledInteger(investingCashFlow),
+          financingCashFlow: formatScaledInteger(financingCashFlow),
+          reconcilingDifference: formatScaledInteger(reconcilingDifference),
+          netIncreaseInCash: formatScaledInteger(actualNetIncreaseInCash),
+          openingCash: formatScaledInteger(openingCash),
+          closingCash: formatScaledInteger(closingCash),
+          isReconciled: reconcilingDifference === 0n,
+        },
+        period: toPeriodRange(params.startDate, params.endDate),
+      };
+    });
+  }
+
+  async _aggregateIncomeStatementLines(tenantId, startDate, endDate) {
+    const pipeline = [
+      {
+        $match: {
+          tenantId: toObjectId(tenantId),
+          status: 'posted',
+          deletedAt: null,
+          date: {
+            $gte: startDate,
+            $lte: endDate,
+          },
+        },
+      },
+      { $unwind: '$lines' },
+      {
+        $lookup: {
+          from: 'accounts',
+          localField: 'lines.accountId',
+          foreignField: '_id',
+          as: 'account',
+        },
+      },
+      { $unwind: '$account' },
+      {
+        $match: {
+          'account.type': { $in: ['revenue', 'expense'] },
+        },
+      },
+      {
+        $group: {
+          _id: {
+            accountId: '$lines.accountId',
+            type: '$account.type',
+            code: '$account.code',
+            nameAr: '$account.nameAr',
+            nameEn: '$account.nameEn',
+          },
+          totalDebit: { $sum: '$lines.debit' },
+          totalCredit: { $sum: '$lines.credit' },
+        },
+      },
+      { $sort: { '_id.code': 1 } },
+    ];
+
+    return JournalEntry.aggregate(pipeline);
+  }
+
+  async _aggregateBalanceSnapshot(tenantId, asOfDate) {
+    const pipeline = [
+      {
+        $match: {
+          tenantId: toObjectId(tenantId),
+          status: 'posted',
+          deletedAt: null,
+          date: { $lte: asOfDate },
+        },
+      },
+      { $unwind: '$lines' },
+      {
+        $lookup: {
+          from: 'accounts',
+          localField: 'lines.accountId',
+          foreignField: '_id',
+          as: 'account',
+        },
+      },
+      { $unwind: '$account' },
+      {
+        $match: {
+          'account.type': { $in: ['asset', 'liability', 'equity'] },
+        },
+      },
+      {
+        $group: {
+          _id: {
+            accountId: '$lines.accountId',
+            type: '$account.type',
+            code: '$account.code',
+            nameAr: '$account.nameAr',
+            nameEn: '$account.nameEn',
+            nature: '$account.nature',
+          },
+          totalDebit: { $sum: '$lines.debit' },
+          totalCredit: { $sum: '$lines.credit' },
+        },
+      },
+      {
+        $project: {
+          accountId: '$_id.accountId',
+          type: '$_id.type',
+          code: '$_id.code',
+          nameAr: '$_id.nameAr',
+          nameEn: '$_id.nameEn',
+          nature: '$_id.nature',
+          balance: {
+            $toString: {
+              $cond: [
+                { $eq: ['$_id.nature', 'debit'] },
+                { $subtract: ['$totalDebit', '$totalCredit'] },
+                { $subtract: ['$totalCredit', '$totalDebit'] },
+              ],
+            },
+          },
+        },
+      },
+      { $sort: { code: 1 } },
+    ];
+
+    return JournalEntry.aggregate(pipeline);
+  }
+
+  async _getNetIncomeForDateRange(tenantId, startDate, endDate) {
+    const totals = await this._aggregateIncomeStatementLines(tenantId, startDate, endDate);
+    let totalRevenue = 0n;
+    let totalExpenses = 0n;
+
+    for (const item of totals) {
+      const debit = toScaledInteger(item.totalDebit);
+      const credit = toScaledInteger(item.totalCredit);
+
+      if (item._id.type === 'revenue') {
+        totalRevenue += credit - debit;
+      } else if (item._id.type === 'expense') {
+        totalExpenses += debit - credit;
+      }
+    }
+
+    return totalRevenue - totalExpenses;
+  }
+
+  async _applyCurrentYearEarnings(tenantId, equity, totalEquity, currentYearEarnings) {
+    const existing = equity.find((entry) => entry.code === CURRENT_YEAR_EARNINGS_CODE);
+    if (existing) {
+      totalEquity -= toScaledInteger(existing.balance);
+      existing.balance = formatScaledInteger(currentYearEarnings);
+      totalEquity += currentYearEarnings;
+      return totalEquity;
+    }
+
+    const currentYearAccount = await Account.findOne({
+      tenantId,
+      code: CURRENT_YEAR_EARNINGS_CODE,
+    })
+      .select('code nameAr nameEn')
+      .lean();
+
+    equity.push({
+      accountId: currentYearAccount?._id || null,
+      code: currentYearAccount?.code || CURRENT_YEAR_EARNINGS_CODE,
+      nameAr: currentYearAccount?.nameAr || 'أرباح/خسائر العام',
+      nameEn: currentYearAccount?.nameEn || 'Current Year Earnings',
+      balance: formatScaledInteger(currentYearEarnings),
+    });
+
+    totalEquity += currentYearEarnings;
+    return totalEquity;
+  }
+
+  async _getYearCloseContext(tenantId, asOfDate) {
+    const currentPeriod = await fiscalPeriodService.findPeriodForDate(tenantId, asOfDate, {
+      required: true,
+    });
+
+    const fiscalYearPeriods = await FiscalPeriod.find({
+      tenantId,
+      year: currentPeriod.year,
+    }).sort({ startDate: 1 });
+
+    const priorFiscalYearPeriods = await FiscalPeriod.find({
+      tenantId,
+      year: { $lt: currentPeriod.year },
+    }).sort({ year: 1, startDate: 1 });
+
+    const pendingPriorYearClosures = [];
+    const priorYearStatusMap = new Map();
+
+    for (const period of priorFiscalYearPeriods) {
+      const year = period.year;
+      const current = priorYearStatusMap.get(year) || { hasOpenPeriod: false };
+      if (period.status === 'open') {
+        current.hasOpenPeriod = true;
+      }
+      priorYearStatusMap.set(year, current);
+    }
+
+    for (const [year, status] of priorYearStatusMap.entries()) {
+      if (status.hasOpenPeriod) {
+        pendingPriorYearClosures.push(year);
+      }
+    }
+
+    return {
+      currentFiscalYear: {
+        year: currentPeriod.year,
+        startDate: fiscalYearPeriods[0].startDate,
+        endDate: fiscalYearPeriods[fiscalYearPeriods.length - 1].endDate,
+      },
+      pendingPriorYearClosures,
+    };
+  }
+
+  async _getCachedReport(reportKey, tenantId, params, computeFn) {
+    const { refresh, compare, ...cacheInput } = params;
+    if (refresh || config.report.cacheTtlSeconds <= 0) {
+      return computeFn();
+    }
+
+    const redis = this._getCacheClient();
+    if (!redis) {
+      return computeFn();
+    }
+
+    let cacheKey = null;
+
+    try {
+      const version = await this._getReportCacheVersion(tenantId);
+      cacheKey = [
+        REPORT_CACHE_PREFIX,
+        reportKey,
+        tenantId,
+        version,
+        hashValue(cacheInput),
+      ].join(':');
+
+      const cached = await redis.get(cacheKey);
+      if (cached) {
+        return JSON.parse(cached);
+      }
+    } catch (error) {
+      logger.warn({ err: error, reportKey, tenantId }, 'Report cache unavailable, continuing uncached');
+    }
+
+    const report = await computeFn();
+
+    if (cacheKey) {
+      try {
+        await redis.setex(cacheKey, config.report.cacheTtlSeconds, JSON.stringify(report));
+      } catch (error) {
+        logger.warn({ err: error, reportKey, tenantId }, 'Failed to store cached report');
+      }
+    }
+
+    return report;
+  }
+
+  _getCacheClient() {
+    try {
+      return getRedisClient();
+    } catch {
+      return null;
+    }
+  }
+
+  async _getReportCacheVersion(tenantId) {
+    const [latestJournalEntry, latestAccount, latestFiscalPeriod] = await Promise.all([
+      JournalEntry.findOne({ tenantId })
+        .sort({ updatedAt: -1 })
+        .select('updatedAt')
+        .setOptions({ __includeDeleted: true }),
+      Account.findOne({ tenantId })
+        .sort({ updatedAt: -1 })
+        .select('updatedAt')
+        .setOptions({ __includeDeleted: true }),
+      FiscalPeriod.findOne({ tenantId })
+        .sort({ updatedAt: -1 })
+        .select('updatedAt'),
+    ]);
+
+    return [
+      latestJournalEntry?.updatedAt?.toISOString() || 'nojournals',
+      latestAccount?.updatedAt?.toISOString() || 'noaccounts',
+      latestFiscalPeriod?.updatedAt?.toISOString() || 'noperiods',
+    ].join('|');
+  }
+
+  _normalizeTrialBalanceParams(params) {
+    const startDate = this._parseOptionalDate('Start date', params.startDate, 'start');
+    const endDate = this._parseOptionalDate('End date', params.endDate, 'end');
+    this._assertDateOrder(startDate, endDate, 'Trial Balance');
+
+    const compare = this._buildOptionalComparisonRange(
+      params.compareStartDate,
+      params.compareEndDate,
+      'Trial Balance comparison'
+    );
+
+    return {
+      startDate,
+      endDate,
+      refresh: Boolean(params.refresh),
+      compare,
+    };
+  }
+
+  _normalizeRequiredRangeParams(params, reportName) {
+    const startDate = this._parseRequiredDate('Start date', params.startDate, reportName, 'start');
+    const endDate = this._parseRequiredDate('End date', params.endDate, reportName, 'end');
+    this._assertDateOrder(startDate, endDate, reportName);
+
+    const compare = this._buildOptionalComparisonRange(
+      params.compareStartDate,
+      params.compareEndDate,
+      `${reportName} comparison`
+    );
+
+    return {
+      startDate,
+      endDate,
+      refresh: Boolean(params.refresh),
+      compare,
+    };
+  }
+
+  _normalizeAsOfParams(params) {
+    const asOfDate = this._parseRequiredDate('As-of date', params.asOfDate, 'Balance Sheet', 'end');
+    const compareAsOfDate = params.compareAsOfDate
+      ? this._parseRequiredDate('Comparison as-of date', params.compareAsOfDate, 'Balance Sheet', 'end')
+      : null;
+
+    return {
+      asOfDate,
+      refresh: Boolean(params.refresh),
+      compare: compareAsOfDate ? { asOfDate: compareAsOfDate, refresh: Boolean(params.refresh) } : null,
+    };
+  }
+
+  _parseOptionalDate(label, value, boundary = 'start') {
+    if (!value) {
+      return null;
+    }
+
+    let parsed;
+    if (isDateOnlyInput(value) || (boundary === 'end' && isMidnightUtcTimestampInput(value))) {
+      const normalizedValue = value.slice(0, 10);
+      parsed = boundary === 'end'
+        ? new Date(`${normalizedValue}T23:59:59.999Z`)
+        : new Date(`${normalizedValue}T00:00:00.000Z`);
+    } else {
+      parsed = new Date(value);
+    }
+
+    if (!isValidDate(parsed)) {
+      throw new BadRequestError(`${label} must be a valid date`);
+    }
+
+    return parsed;
+  }
+
+  _parseRequiredDate(label, value, reportName, boundary = 'start') {
+    if (!value) {
+      throw new BadRequestError(`${label} is required for ${reportName}`);
+    }
+
+    return this._parseOptionalDate(label, value, boundary);
+  }
+
+  _assertDateOrder(startDate, endDate, reportName) {
+    if (startDate && endDate && startDate > endDate) {
+      throw new BadRequestError(`${reportName} end date must be on or after the start date`);
+    }
+  }
+
+  _buildOptionalComparisonRange(compareStartDateValue, compareEndDateValue, comparisonLabel) {
+    const hasCompareStart = Boolean(compareStartDateValue);
+    const hasCompareEnd = Boolean(compareEndDateValue);
+
+    if (!hasCompareStart && !hasCompareEnd) {
+      return null;
+    }
+
+    if (hasCompareStart !== hasCompareEnd) {
+      throw new BadRequestError(`${comparisonLabel} requires both start and end dates`);
+    }
+
+    const compareStartDate = this._parseRequiredDate(
+      'Comparison start date',
+      compareStartDateValue,
+      comparisonLabel,
+      'start'
+    );
+    const compareEndDate = this._parseRequiredDate(
+      'Comparison end date',
+      compareEndDateValue,
+      comparisonLabel,
+      'end'
+    );
+    this._assertDateOrder(compareStartDate, compareEndDate, comparisonLabel);
+
+    return {
+      startDate: compareStartDate,
+      endDate: compareEndDate,
+      refresh: false,
+    };
+  }
+
+  _attachComparison(primaryReport, comparisonReport, {
+    entryFields,
+    totalsFields,
+    collectionKeys,
+    comparisonPeriodKey,
+  }) {
+    const mergedReport = {
+      ...primaryReport,
+      comparison: {
+        [comparisonPeriodKey]: comparisonReport[comparisonPeriodKey],
+        totals: comparisonReport.totals,
+        delta: this._buildTotalsDelta(primaryReport.totals, comparisonReport.totals, totalsFields),
+      },
+    };
+
+    for (const collectionKey of collectionKeys) {
+      mergedReport[collectionKey] = this._mergeEntries(
+        primaryReport[collectionKey],
+        comparisonReport[collectionKey],
+        entryFields
+      );
+    }
+
+    return mergedReport;
+  }
+
+  _mergeEntries(primaryEntries = [], comparisonEntries = [], entryFields) {
+    const merged = new Map();
+
+    for (const entry of primaryEntries) {
+      const key = entry.code;
+      const mergedEntry = { ...entry };
+
+      for (const field of entryFields) {
+        mergedEntry[field.comparisonKey] = null;
+        mergedEntry[field.deltaKey] = entry[field.key];
+      }
+
+      merged.set(key, mergedEntry);
+    }
+
+    for (const entry of comparisonEntries) {
+      const key = entry.code;
+      const mergedEntry = merged.get(key) || {
+        ...entry,
+      };
+
+      for (const field of entryFields) {
+        const primaryValue = mergedEntry[field.key] || '0.00';
+        const comparisonValue = entry[field.key] || '0.00';
+        mergedEntry[field.key] = mergedEntry[field.key] || '0.00';
+        mergedEntry[field.comparisonKey] = comparisonValue;
+        mergedEntry[field.deltaKey] = formatScaledInteger(
+          toScaledInteger(primaryValue) - toScaledInteger(comparisonValue)
+        );
+      }
+
+      merged.set(key, mergedEntry);
+    }
+
+    return Array.from(merged.values()).sort((left, right) => left.code.localeCompare(right.code));
+  }
+
+  _buildTotalsDelta(primaryTotals, comparisonTotals, fields) {
+    return fields.reduce((delta, field) => {
+      delta[field] = formatScaledInteger(
+        toScaledInteger(primaryTotals[field] || '0.00') -
+        toScaledInteger(comparisonTotals[field] || '0.00')
+      );
+      return delta;
+    }, {});
+  }
+
+  _getSnapshotBalance(entry) {
+    if (!entry) {
+      return 0n;
+    }
+
+    return toScaledInteger(entry.balance || '0.00');
+  }
+
+  _sumCashBalances(snapshot) {
+    return snapshot
+      .filter((entry) => this._isCashAccount(entry.code))
+      .reduce((sum, entry) => sum + toScaledInteger(entry.balance), 0n);
+  }
+
+  _isCashAccount(code) {
+    return CASH_ACCOUNT_PREFIXES.some((prefix) => code.startsWith(prefix));
+  }
+
+  _isInvestingAccount(code) {
+    return code.startsWith('12') && code !== '1290';
+  }
+
+  _isFinancingAccount(code) {
+    if (code.startsWith('22')) {
+      return true;
+    }
+
+    return ['3100', '3400'].includes(code);
+  }
+
+  _getFinancingCashImpact(code, delta) {
+    if (code === '3400') {
+      return -delta;
+    }
+
+    return delta;
+  }
+}
+
+module.exports = new ReportService();
