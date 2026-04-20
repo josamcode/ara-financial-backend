@@ -144,7 +144,7 @@ class LedgerService {
         reference: m.reference || null,
         debit: formatScaledInteger(debit),
         credit: formatScaledInteger(credit),
-        runningBalance: formatScaledInteger(runningBalance),
+        balance: formatScaledInteger(runningBalance),
       };
     });
 
