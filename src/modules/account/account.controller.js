@@ -8,10 +8,16 @@ const { parsePagination, buildPaginationMeta } = require('../../common/utils/res
 class AccountController {
   async list(req, res) {
     const pagination = parsePagination(req.query);
-    const { type, isActive, search } = req.query;
+    const { type, isActive, isParentOnly, search } = req.query;
     const { accounts, total } = await accountService.listAccounts(
       req.user.tenantId,
-      { type, isActive: isActive === 'true' ? true : isActive === 'false' ? false : undefined, search, ...pagination }
+      {
+        type,
+        isActive: isActive === 'true' ? true : isActive === 'false' ? false : undefined,
+        isParentOnly: isParentOnly === 'true' ? true : isParentOnly === 'false' ? false : undefined,
+        search,
+        ...pagination,
+      }
     );
     const meta = buildPaginationMeta(pagination.page, pagination.limit, total);
     return paginated(res, accounts, meta);

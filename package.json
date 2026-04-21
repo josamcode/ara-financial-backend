@@ -7,7 +7,8 @@
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "test": "node --test --test-concurrency=1 test/*.test.js",
-    "verify": "node scripts/verify.js"
+    "verify": "node scripts/verify.js",
+    "record:journal-transactions": "node scripts/record-journal-transactions.js"
   },
   "keywords": [
     "accounting",

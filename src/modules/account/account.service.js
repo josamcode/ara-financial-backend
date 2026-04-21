@@ -24,10 +24,11 @@ class AccountService {
   /**
    * List accounts with optional filters.
    */
-  async listAccounts(tenantId, { type, isActive, search, page, limit, skip }) {
+  async listAccounts(tenantId, { type, isActive, isParentOnly, search, page, limit, skip }) {
     const filter = { tenantId };
     if (type) filter.type = type;
     if (isActive !== undefined) filter.isActive = isActive;
+    if (isParentOnly !== undefined) filter.isParentOnly = isParentOnly;
     if (search) {
       filter.$or = [
         { nameAr: { $regex: search, $options: 'i' } },
