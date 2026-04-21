@@ -14,6 +14,7 @@ const lineItemSchema = z.object({
 });
 
 const createInvoiceSchema = z.object({
+  customerId: z.string().optional().nullable(),
   customerName: z.string().min(1).max(200),
   customerEmail: z.string().email().optional().or(z.literal('')),
   issueDate: z.string().refine((v) => !isNaN(Date.parse(v)), 'Valid date required'),
@@ -26,6 +27,7 @@ const createInvoiceSchema = z.object({
 });
 
 const updateInvoiceSchema = z.object({
+  customerId: z.string().optional().nullable(),
   customerName: z.string().min(1).max(200).optional(),
   customerEmail: z.string().email().optional().or(z.literal('')),
   issueDate: z.string().refine((v) => !isNaN(Date.parse(v)), 'Valid date required').optional(),

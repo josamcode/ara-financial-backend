@@ -3,6 +3,7 @@
 const mongoose = require('mongoose');
 const { Invoice } = require('./invoice.model');
 const InvoiceCounter = require('./invoiceCounter.model');
+const { Customer } = require('../customer/customer.model');
 const journalService = require('../journal/journal.service');
 const auditService = require('../audit/audit.service');
 const { BadRequestError, NotFoundError } = require('../../common/errors');
@@ -12,11 +13,21 @@ class InvoiceService {
   async createInvoice(tenantId, userId, data, options = {}) {
     const invoiceNumber = await this._getNextInvoiceNumber(tenantId);
 
+    let { customerName, customerEmail, customerId } = data;
+    if (customerId) {
+      const customer = await Customer.findOne({ _id: customerId, tenantId, deletedAt: null });
+      if (customer) {
+        customerName = customer.name;
+        customerEmail = customer.email || customerEmail || '';
+      }
+    }
+
     const invoice = await Invoice.create({
       tenantId,
       invoiceNumber,
-      customerName: data.customerName,
-      customerEmail: data.customerEmail || '',
+      customerId: customerId || null,
+      customerName,
+      customerEmail: customerEmail || '',
       issueDate: new Date(data.issueDate),
       dueDate: new Date(data.dueDate),
       currency: data.currency || 'EGP',
@@ -73,6 +84,7 @@ class InvoiceService {
   async getInvoiceById(invoiceId, tenantId) {
     const invoice = await Invoice.findOne({ _id: invoiceId, tenantId })
       .populate({ path: 'createdBy', select: 'name email', match: { tenantId } })
+      .populate({ path: 'customerId', select: 'name email phone', match: { tenantId } })
       .populate({
         path: 'sentJournalEntryId',
         select: 'entryNumber date status',
@@ -95,8 +107,23 @@ class InvoiceService {
       throw new BadRequestError('Only draft invoices can be edited');
     }
 
-    if (data.customerName !== undefined) invoice.customerName = data.customerName;
-    if (data.customerEmail !== undefined) invoice.customerEmail = data.customerEmail;
+    if (data.customerId !== undefined) {
+      if (data.customerId) {
+        const customer = await Customer.findOne({ _id: data.customerId, tenantId, deletedAt: null });
+        if (customer) {
+          invoice.customerId = customer._id;
+          invoice.customerName = customer.name;
+          invoice.customerEmail = customer.email || invoice.customerEmail;
+        }
+      } else {
+        invoice.customerId = null;
+        if (data.customerName !== undefined) invoice.customerName = data.customerName;
+        if (data.customerEmail !== undefined) invoice.customerEmail = data.customerEmail;
+      }
+    } else {
+      if (data.customerName !== undefined) invoice.customerName = data.customerName;
+      if (data.customerEmail !== undefined) invoice.customerEmail = data.customerEmail;
+    }
     if (data.issueDate) invoice.issueDate = new Date(data.issueDate);
     if (data.dueDate) invoice.dueDate = new Date(data.dueDate);
     if (data.currency) invoice.currency = data.currency;
@@ -134,6 +161,7 @@ class InvoiceService {
     }
 
     const totalStr = invoice.total.toString();
+    const sendDescription = `إرسال فاتورة - ${invoice.invoiceNumber}`;
 
     // Create journal entry (draft then post)
     const entry = await journalService.createEntry(
@@ -142,11 +170,12 @@ class InvoiceService {
       {
         date: invoice.issueDate.toISOString(),
         description: `فاتورة رقم ${invoice.invoiceNumber} - ${invoice.customerName}`,
+        description: sendDescription,
         reference: invoice.invoiceNumber,
         lines: [
           { accountId: arAccountId, debit: totalStr, credit: '0', description: 'ذمم مدينة' },
           { accountId: revenueAccountId, debit: '0', credit: totalStr, description: 'إيراد' },
-        ],
+        ].map((line) => ({ ...line, description: sendDescription })),
       },
       { auditContext: options.auditContext }
     );
@@ -185,6 +214,7 @@ class InvoiceService {
     }
     const totalStr = invoice.total.toString();
     const date = paymentDate ? new Date(paymentDate) : new Date();
+    const paymentDescription = `تحصيل فاتورة - ${invoice.invoiceNumber}`;
     const arAccountId = invoice.arAccountId?._id
       ? invoice.arAccountId._id.toString()
       : invoice.arAccountId?.toString();
@@ -198,11 +228,12 @@ class InvoiceService {
       {
         date: date.toISOString(),
         description: `تحصيل فاتورة رقم ${invoice.invoiceNumber} - ${invoice.customerName}`,
+        description: paymentDescription,
         reference: invoice.invoiceNumber,
         lines: [
           { accountId: cashAccountId, debit: totalStr, credit: '0', description: 'تحصيل نقدي' },
           { accountId: arAccountId, debit: '0', credit: totalStr, description: 'ذمم مدينة' },
-        ],
+        ].map((line) => ({ ...line, description: paymentDescription })),
       },
       { auditContext: options.auditContext }
     );

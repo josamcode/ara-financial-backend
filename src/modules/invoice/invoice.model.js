@@ -19,6 +19,7 @@ const lineItemSchema = new mongoose.Schema(
 const invoiceSchema = new mongoose.Schema(
   {
     invoiceNumber: { type: String, required: true },
+    customerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', default: null },
     customerName: { type: String, required: true, trim: true, maxlength: 200 },
     customerEmail: { type: String, trim: true, lowercase: true, default: '' },
     issueDate: { type: Date, required: true },
@@ -78,6 +79,7 @@ invoiceSchema.index({ tenantId: 1, invoiceNumber: 1 }, { unique: true });
 invoiceSchema.index({ tenantId: 1, status: 1 });
 invoiceSchema.index({ tenantId: 1, dueDate: 1 });
 invoiceSchema.index({ tenantId: 1, createdBy: 1 });
+invoiceSchema.index({ tenantId: 1, customerId: 1 });
 
 const Invoice = mongoose.model('Invoice', invoiceSchema);
 

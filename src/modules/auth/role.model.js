@@ -49,6 +49,12 @@ const PERMISSIONS = {
   INVOICE_DELETE: 'invoice:delete',
   INVOICE_SEND: 'invoice:send',
 
+  // Customer permissions
+  CUSTOMER_READ: 'customer:read',
+  CUSTOMER_CREATE: 'customer:create',
+  CUSTOMER_UPDATE: 'customer:update',
+  CUSTOMER_DELETE: 'customer:delete',
+
   // Audit permissions
   AUDIT_READ: 'audit:read',
 
@@ -94,6 +100,9 @@ const DEFAULT_ROLES = {
       PERMISSIONS.INVOICE_CREATE,
       PERMISSIONS.INVOICE_UPDATE,
       PERMISSIONS.INVOICE_SEND,
+      PERMISSIONS.CUSTOMER_READ,
+      PERMISSIONS.CUSTOMER_CREATE,
+      PERMISSIONS.CUSTOMER_UPDATE,
     ],
     isSystem: true,
   },
