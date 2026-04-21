@@ -16,6 +16,7 @@ router.get('/', authorize(PERMISSIONS.CUSTOMER_READ), asyncHandler(controller.li
 router.post('/', authorize(PERMISSIONS.CUSTOMER_CREATE), validate({ body: createCustomerSchema }), asyncHandler(controller.create));
 router.get('/:id', authorize(PERMISSIONS.CUSTOMER_READ), asyncHandler(controller.getById));
 router.get('/:id/invoices', authorize(PERMISSIONS.CUSTOMER_READ), asyncHandler(controller.getInvoices));
+router.get('/:id/statement', authorize(PERMISSIONS.CUSTOMER_READ), asyncHandler(controller.getStatement));
 router.patch('/:id', authorize(PERMISSIONS.CUSTOMER_UPDATE), validate({ body: updateCustomerSchema }), asyncHandler(controller.update));
 router.delete('/:id', authorize(PERMISSIONS.CUSTOMER_DELETE), asyncHandler(controller.delete));
 

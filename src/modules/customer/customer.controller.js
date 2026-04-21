@@ -38,6 +38,11 @@ const controller = {
     res.json({ success: true, data: result });
   },
 
+  async getStatement(req, res) {
+    const result = await customerService.getCustomerStatement(req.params.id, req.tenantId);
+    res.json({ success: true, data: result });
+  },
+
   async create(req, res) {
     const customer = await customerService.createCustomer(
       req.tenantId,
