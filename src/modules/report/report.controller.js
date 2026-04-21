@@ -168,6 +168,11 @@ class ReportController {
     return success(res, report);
   }
 
+  async arAging(req, res) {
+    const report = await reportService.getARAging(req.user.tenantId, req.query);
+    return success(res, report);
+  }
+
   async exportTrialBalance(req, res) {
     const report = await reportService.getTrialBalance(req.user.tenantId, req.query);
     return sendExport(res, {
@@ -255,7 +260,6 @@ class ReportController {
       ],
     });
   }
-
 }
 
 module.exports = new ReportController();

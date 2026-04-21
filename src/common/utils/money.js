@@ -41,13 +41,19 @@ function formatScaledInteger(value, fractionDigits = 2) {
 
   const roundingFactor = 10n ** BigInt(MONEY_SCALE - safeDigits);
   const rounded = (absolute + (roundingFactor / 2n)) / roundingFactor;
+
   const displayFactor = 10n ** BigInt(safeDigits);
   const intPart = rounded / displayFactor;
+
   const fractionPart = (rounded % displayFactor)
     .toString()
     .padStart(safeDigits, '0');
 
   if (safeDigits === 0) {
+    return `${sign}${intPart.toString()}`;
+  }
+
+  if (/^0+$/.test(fractionPart)) {
     return `${sign}${intPart.toString()}`;
   }
 

@@ -11,6 +11,7 @@ const {
   incomeStatementQuerySchema,
   balanceSheetQuerySchema,
   cashFlowQuerySchema,
+  arAgingQuerySchema,
   trialBalanceExportQuerySchema,
   incomeStatementExportQuerySchema,
   balanceSheetExportQuerySchema,
@@ -45,6 +46,12 @@ router.get(
   authorize(PERMISSIONS.REPORT_VIEW),
   validate({ query: cashFlowQuerySchema }),
   asyncHandler(controller.cashFlow)
+);
+router.get(
+  '/ar-aging',
+  authorize(PERMISSIONS.REPORT_VIEW),
+  validate({ query: arAgingQuerySchema }),
+  asyncHandler(controller.arAging)
 );
 
 // Exports

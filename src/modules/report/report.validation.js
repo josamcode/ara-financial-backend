@@ -98,6 +98,11 @@ const cashFlowQuerySchema = z.object({
   validateDateOrder(data, ctx, 'compareStartDate', 'compareEndDate', 'Comparison');
 });
 
+const arAgingQuerySchema = z.object({
+  asOfDate: isoDateSchema.optional(),
+  refresh: refreshSchema,
+}).strict();
+
 const trialBalanceExportQuerySchema = trialBalanceQuerySchema.extend({
   format: exportFormatSchema,
 }).strict();
@@ -119,6 +124,7 @@ module.exports = {
   incomeStatementQuerySchema,
   balanceSheetQuerySchema,
   cashFlowQuerySchema,
+  arAgingQuerySchema,
   trialBalanceExportQuerySchema,
   incomeStatementExportQuerySchema,
   balanceSheetExportQuerySchema,

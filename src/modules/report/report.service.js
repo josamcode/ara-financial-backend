@@ -8,6 +8,7 @@ const { getRedisClient } = require('../../config/redis');
 const { JournalEntry } = require('../journal/journal.model');
 const { Account } = require('../account/account.model');
 const { FiscalPeriod } = require('../fiscal-period/fiscalPeriod.model');
+const { Invoice } = require('../invoice/invoice.model');
 const fiscalPeriodService = require('../fiscal-period/fiscalPeriod.service');
 const { BadRequestError } = require('../../common/errors');
 const {
@@ -19,6 +20,7 @@ const REPORT_CACHE_PREFIX = 'report:';
 const CURRENT_YEAR_EARNINGS_CODE = '3300';
 const RETAINED_EARNINGS_CODE = '3200';
 const CASH_ACCOUNT_PREFIXES = ['111'];
+const AR_AGING_ELIGIBLE_STATUSES = ['sent', 'partially_paid', 'overdue'];
 
 const WORKING_CAPITAL_RULES = Object.freeze([
   { code: '1120', label: 'Accounts Receivable', section: 'operating', multiplier: -1n },
@@ -138,6 +140,84 @@ class ReportService {
       ],
       collectionKeys: ['operating', 'investing', 'financing', 'reconcilingItems'],
       comparisonPeriodKey: 'period',
+    });
+  }
+
+  async getARAging(tenantId, params = {}) {
+    const primaryParams = this._normalizeOptionalAsOfParams(params, 'AR Aging');
+
+    return this._getCachedReport('ar-aging', tenantId, primaryParams, async () => {
+      const invoices = await Invoice.find({
+        tenantId,
+        deletedAt: null,
+        status: { $in: AR_AGING_ELIGIBLE_STATUSES },
+      })
+        .select('customerId customerName issueDate dueDate total paidAmount remainingAmount status')
+        .lean();
+
+      const customerRows = new Map();
+      let totalOutstanding = 0n;
+      let overdueInvoicesCount = 0;
+
+      for (const invoice of invoices) {
+        const remainingAmount = this._resolveInvoiceRemainingScaledAmount(invoice);
+        if (remainingAmount <= 0n) {
+          continue;
+        }
+
+        const customerId = invoice.customerId?.toString?.() ?? null;
+        const customerName = invoice.customerName || '—';
+        const customerKey = customerId || `name:${customerName}`;
+        const referenceDate = invoice.dueDate || invoice.issueDate;
+        const daysPastDue = this._getDaysPastDue(primaryParams.asOfDate, referenceDate);
+        const bucketKey = this._getARAgingBucketKey(daysPastDue);
+
+        if (!customerRows.has(customerKey)) {
+          customerRows.set(customerKey, {
+            customerId,
+            customerName,
+            days0_30: 0n,
+            days31_60: 0n,
+            days61_90: 0n,
+            days90Plus: 0n,
+            totalOutstanding: 0n,
+          });
+        }
+
+        const row = customerRows.get(customerKey);
+        row[bucketKey] += remainingAmount;
+        row.totalOutstanding += remainingAmount;
+        totalOutstanding += remainingAmount;
+
+        if (daysPastDue > 0) {
+          overdueInvoicesCount += 1;
+        }
+      }
+
+      const rows = Array.from(customerRows.values())
+        .sort((left, right) => (
+          left.customerName.localeCompare(right.customerName)
+          || String(left.customerId || '').localeCompare(String(right.customerId || ''))
+        ))
+        .map((row) => ({
+          customerId: row.customerId,
+          customerName: row.customerName,
+          days0_30: formatScaledInteger(row.days0_30),
+          days31_60: formatScaledInteger(row.days31_60),
+          days61_90: formatScaledInteger(row.days61_90),
+          days90Plus: formatScaledInteger(row.days90Plus),
+          totalOutstanding: formatScaledInteger(row.totalOutstanding),
+        }));
+
+      return {
+        summary: {
+          totalOutstanding: formatScaledInteger(totalOutstanding),
+          customersWithOutstanding: rows.length,
+          overdueInvoicesCount,
+        },
+        rows,
+        asOfDate: toIsoString(primaryParams.asOfDate),
+      };
     });
   }
 
@@ -731,7 +811,7 @@ class ReportService {
   }
 
   async _getReportCacheVersion(tenantId) {
-    const [latestJournalEntry, latestAccount, latestFiscalPeriod] = await Promise.all([
+    const [latestJournalEntry, latestAccount, latestFiscalPeriod, latestInvoice] = await Promise.all([
       JournalEntry.findOne({ tenantId })
         .sort({ updatedAt: -1 })
         .select('updatedAt')
@@ -743,12 +823,17 @@ class ReportService {
       FiscalPeriod.findOne({ tenantId })
         .sort({ updatedAt: -1 })
         .select('updatedAt'),
+      Invoice.findOne({ tenantId })
+        .sort({ updatedAt: -1 })
+        .select('updatedAt')
+        .setOptions({ __includeDeleted: true }),
     ]);
 
     return [
       latestJournalEntry?.updatedAt?.toISOString() || 'nojournals',
       latestAccount?.updatedAt?.toISOString() || 'noaccounts',
       latestFiscalPeriod?.updatedAt?.toISOString() || 'noperiods',
+      latestInvoice?.updatedAt?.toISOString() || 'noinvoices',
     ].join('|');
   }
 
@@ -800,6 +885,17 @@ class ReportService {
       asOfDate,
       refresh: Boolean(params.refresh),
       compare: compareAsOfDate ? { asOfDate: compareAsOfDate, refresh: Boolean(params.refresh) } : null,
+    };
+  }
+
+  _normalizeOptionalAsOfParams(params, reportName) {
+    const asOfDate = params.asOfDate
+      ? this._parseRequiredDate('As-of date', params.asOfDate, reportName, 'end')
+      : this._parseOptionalDate('As-of date', new Date().toISOString().slice(0, 10), 'end');
+
+    return {
+      asOfDate,
+      refresh: Boolean(params.refresh),
     };
   }
 
@@ -981,6 +1077,53 @@ class ReportService {
     }
 
     return delta;
+  }
+
+  _resolveInvoiceRemainingScaledAmount(invoice) {
+    if (typeof invoice.remainingAmount === 'number') {
+      return toScaledInteger(invoice.remainingAmount.toString());
+    }
+
+    const totalAmount = toScaledInteger(invoice.total?.toString?.() ?? invoice.total ?? '0');
+    if (invoice.status === 'paid') {
+      return 0n;
+    }
+
+    const paidAmount = typeof invoice.paidAmount === 'number'
+      ? toScaledInteger(invoice.paidAmount.toString())
+      : 0n;
+    const remainingAmount = totalAmount - paidAmount;
+
+    return remainingAmount > 0n ? remainingAmount : 0n;
+  }
+
+  _getDaysPastDue(asOfDate, referenceDateValue) {
+    if (!referenceDateValue) {
+      return 0;
+    }
+
+    const referenceDate = new Date(referenceDateValue);
+    const asOfUtcMidnight = Date.UTC(
+      asOfDate.getUTCFullYear(),
+      asOfDate.getUTCMonth(),
+      asOfDate.getUTCDate()
+    );
+    const referenceUtcMidnight = Date.UTC(
+      referenceDate.getUTCFullYear(),
+      referenceDate.getUTCMonth(),
+      referenceDate.getUTCDate()
+    );
+
+    return Math.floor((asOfUtcMidnight - referenceUtcMidnight) / 86400000);
+  }
+
+  _getARAgingBucketKey(daysPastDue) {
+    const normalizedDays = Math.max(0, daysPastDue);
+
+    if (normalizedDays <= 30) return 'days0_30';
+    if (normalizedDays <= 60) return 'days31_60';
+    if (normalizedDays <= 90) return 'days61_90';
+    return 'days90Plus';
   }
 }
 
