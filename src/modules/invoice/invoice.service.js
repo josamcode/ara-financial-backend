@@ -34,6 +34,9 @@ class InvoiceService {
       lineItems: this._buildLineItems(data.lineItems),
       subtotal: mongoose.Types.Decimal128.fromString(data.subtotal),
       total: mongoose.Types.Decimal128.fromString(data.total),
+      paidAmount: 0,
+      remainingAmount: Number(data.total),
+      payments: [],
       notes: data.notes || '',
       status: 'draft',
       createdBy: userId,
@@ -94,6 +97,16 @@ class InvoiceService {
         path: 'paymentJournalEntryId',
         select: 'entryNumber date status',
         match: { tenantId },
+      })
+      .populate({
+        path: 'payments.accountId',
+        select: 'code nameAr nameEn',
+        match: { tenantId },
+      })
+      .populate({
+        path: 'payments.journalEntryId',
+        select: 'entryNumber date status',
+        match: { tenantId },
       });
 
     if (!invoice) throw new NotFoundError('Invoice not found');
@@ -132,7 +145,11 @@ class InvoiceService {
       invoice.lineItems = this._buildLineItems(data.lineItems);
     }
     if (data.subtotal) invoice.subtotal = mongoose.Types.Decimal128.fromString(data.subtotal);
-    if (data.total) invoice.total = mongoose.Types.Decimal128.fromString(data.total);
+    if (data.total) {
+      invoice.total = mongoose.Types.Decimal128.fromString(data.total);
+      invoice.paidAmount = 0;
+      invoice.remainingAmount = Number(data.total);
+    }
 
     await invoice.save();
 
@@ -184,6 +201,8 @@ class InvoiceService {
 
     invoice.status = 'sent';
     invoice.arAccountId = arAccountId;
+    invoice.paidAmount = 0;
+    invoice.remainingAmount = Number(totalStr);
     invoice.sentAt = new Date();
     invoice.sentJournalEntryId = entry._id;
     await invoice.save();
@@ -206,13 +225,25 @@ class InvoiceService {
    * Record payment and create accounting entry:
    * Dr Cash/Bank / Cr Accounts Receivable
    */
-  async recordPayment(invoiceId, tenantId, userId, { cashAccountId, paymentDate }, options = {}) {
+  async recordPayment(invoiceId, tenantId, userId, { cashAccountId, amount, paymentDate }, options = {}) {
     const invoice = await Invoice.findOne({ _id: invoiceId, tenantId });
     if (!invoice) throw new NotFoundError('Invoice not found');
-    if (!['sent', 'overdue'].includes(invoice.status)) {
-      throw new BadRequestError('Only sent or overdue invoices can be marked as paid');
+    if (!['sent', 'partially_paid'].includes(invoice.status)) {
+      throw new BadRequestError('Only sent or partially paid invoices can be paid');
     }
-    const totalStr = invoice.total.toString();
+
+    const totalAmount = this._roundMonetaryAmount(Number(invoice.total?.toString() ?? 0));
+    const paidAmount = this._resolvePaidAmount(invoice, totalAmount);
+    const remainingAmount = this._resolveRemainingAmount(invoice, totalAmount, paidAmount);
+    const paymentAmount = this._roundMonetaryAmount(Number(amount));
+    if (!Number.isFinite(paymentAmount) || paymentAmount <= 0) {
+      throw new BadRequestError('Payment amount must be greater than zero');
+    }
+    if (paymentAmount > remainingAmount) {
+      throw new BadRequestError('Payment amount cannot exceed remaining amount');
+    }
+
+    const amountStr = paymentAmount.toFixed(6).replace(/\.?0+$/, '');
     const date = paymentDate ? new Date(paymentDate) : new Date();
     const paymentDescription = `تحصيل فاتورة - ${invoice.invoiceNumber}`;
     const arAccountId = invoice.arAccountId?._id
@@ -231,8 +262,8 @@ class InvoiceService {
         description: paymentDescription,
         reference: invoice.invoiceNumber,
         lines: [
-          { accountId: cashAccountId, debit: totalStr, credit: '0', description: 'تحصيل نقدي' },
-          { accountId: arAccountId, debit: '0', credit: totalStr, description: 'ذمم مدينة' },
+          { accountId: cashAccountId, debit: amountStr, credit: '0', description: 'تحصيل نقدي' },
+          { accountId: arAccountId, debit: '0', credit: amountStr, description: 'ذمم مدينة' },
         ].map((line) => ({ ...line, description: paymentDescription })),
       },
       { auditContext: options.auditContext }
@@ -240,8 +271,21 @@ class InvoiceService {
 
     await journalService.postEntry(entry._id, tenantId, userId, { auditContext: options.auditContext });
 
-    invoice.status = 'paid';
-    invoice.paidAt = new Date();
+    invoice.paidAmount = this._roundMonetaryAmount(paidAmount + paymentAmount);
+    invoice.remainingAmount = this._roundMonetaryAmount(totalAmount - invoice.paidAmount);
+    if (invoice.remainingAmount < 0) invoice.remainingAmount = 0;
+    invoice.payments.push({
+      amount: paymentAmount,
+      date,
+      accountId: cashAccountId,
+      journalEntryId: entry._id,
+    });
+    invoice.status = invoice.remainingAmount === 0
+      ? 'paid'
+      : invoice.paidAmount > 0
+        ? 'partially_paid'
+        : 'sent';
+    invoice.paidAt = invoice.remainingAmount === 0 ? new Date() : null;
     invoice.paymentJournalEntryId = entry._id;
     await invoice.save();
 
@@ -251,11 +295,11 @@ class InvoiceService {
       action: 'invoice.paid',
       resourceType: 'Invoice',
       resourceId: invoice._id,
-      newValues: { invoiceNumber: invoice.invoiceNumber, journalEntryId: entry._id },
+      newValues: { invoiceNumber: invoice.invoiceNumber, journalEntryId: entry._id, amount: paymentAmount },
       auditContext: options.auditContext,
     });
 
-    logger.info({ tenantId, invoiceId, entryId: entry._id }, 'Invoice payment recorded');
+    logger.info({ tenantId, invoiceId, entryId: entry._id, amount: paymentAmount }, 'Invoice payment recorded');
     return invoice;
   }
 
@@ -309,6 +353,23 @@ class InvoiceService {
       unitPrice: mongoose.Types.Decimal128.fromString(item.unitPrice),
       lineTotal: mongoose.Types.Decimal128.fromString(item.lineTotal),
     }));
+  }
+
+  _roundMonetaryAmount(value) {
+    return Math.round((Number(value) + Number.EPSILON) * 1000000) / 1000000;
+  }
+
+  _resolvePaidAmount(invoice, totalAmount) {
+    if (typeof invoice.paidAmount === 'number') return this._roundMonetaryAmount(invoice.paidAmount);
+    return invoice.status === 'paid' ? totalAmount : 0;
+  }
+
+  _resolveRemainingAmount(invoice, totalAmount, paidAmount = this._resolvePaidAmount(invoice, totalAmount)) {
+    if (typeof invoice.remainingAmount === 'number') {
+      return this._roundMonetaryAmount(invoice.remainingAmount);
+    }
+    if (invoice.status === 'paid') return 0;
+    return this._roundMonetaryAmount(totalAmount - paidAmount);
   }
 
   async _getNextInvoiceNumber(tenantId) {

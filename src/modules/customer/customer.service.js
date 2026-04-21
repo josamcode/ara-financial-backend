@@ -37,14 +37,29 @@ class CustomerService {
       .sort({ issueDate: -1 })
       .lean();
 
-    const INVOICED_STATUSES = ['sent', 'paid', 'overdue'];
+    const INVOICED_STATUSES = ['sent', 'partially_paid', 'paid', 'overdue'];
     let totalInvoiced = 0;
     let totalPaid = 0;
+    let outstandingBalance = 0;
 
     for (const inv of invoices) {
       const amount = parseFloat(inv.total?.toString() ?? '0');
-      if (INVOICED_STATUSES.includes(inv.status)) totalInvoiced += amount;
-      if (inv.status === 'paid') totalPaid += amount;
+      if (!INVOICED_STATUSES.includes(inv.status)) continue;
+
+      const paidAmount = typeof inv.paidAmount === 'number'
+        ? inv.paidAmount
+        : inv.status === 'paid'
+          ? amount
+          : 0;
+      const remainingAmount = typeof inv.remainingAmount === 'number'
+        ? inv.remainingAmount
+        : inv.status === 'paid'
+          ? 0
+          : amount - paidAmount;
+
+      totalInvoiced += amount;
+      totalPaid += paidAmount;
+      outstandingBalance += remainingAmount;
     }
 
     return {
@@ -53,7 +68,7 @@ class CustomerService {
       summary: {
         totalInvoiced,
         totalPaid,
-        outstandingBalance: totalInvoiced - totalPaid,
+        outstandingBalance,
       },
     };
   }

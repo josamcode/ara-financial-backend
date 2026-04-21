@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const tenantPlugin = require('../../common/plugins/tenantPlugin');
 const softDeletePlugin = require('../../common/plugins/softDeletePlugin');
 
-const INVOICE_STATUSES = ['draft', 'sent', 'paid', 'overdue', 'cancelled'];
+const INVOICE_STATUSES = ['draft', 'sent', 'partially_paid', 'paid', 'overdue', 'cancelled'];
 
 const lineItemSchema = new mongoose.Schema(
   {
@@ -12,6 +12,24 @@ const lineItemSchema = new mongoose.Schema(
     quantity: { type: mongoose.Schema.Types.Decimal128, required: true },
     unitPrice: { type: mongoose.Schema.Types.Decimal128, required: true },
     lineTotal: { type: mongoose.Schema.Types.Decimal128, required: true },
+  },
+  { _id: true }
+);
+
+const paymentSchema = new mongoose.Schema(
+  {
+    amount: { type: Number, required: true, min: 0 },
+    date: { type: Date, required: true, default: Date.now },
+    accountId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Account',
+      required: true,
+    },
+    journalEntryId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'JournalEntry',
+      required: true,
+    },
   },
   { _id: true }
 );
@@ -29,6 +47,14 @@ const invoiceSchema = new mongoose.Schema(
     lineItems: { type: [lineItemSchema], default: [] },
     subtotal: { type: mongoose.Schema.Types.Decimal128, required: true },
     total: { type: mongoose.Schema.Types.Decimal128, required: true },
+    paidAmount: { type: Number, default: 0 },
+    remainingAmount: {
+      type: Number,
+      default() {
+        return Number(this.total?.toString?.() ?? this.total ?? 0);
+      },
+    },
+    payments: { type: [paymentSchema], default: [] },
     notes: { type: String, trim: true, maxlength: 2000, default: '' },
     // Accounting links
     arAccountId: {
@@ -58,6 +84,19 @@ const invoiceSchema = new mongoose.Schema(
         const dec = (v) => (v ? v.toString() : '0');
         ret.subtotal = dec(ret.subtotal);
         ret.total = dec(ret.total);
+        const totalAmount = Number(ret.total);
+        const paidAmount = typeof ret.paidAmount === 'number'
+          ? ret.paidAmount
+          : ret.status === 'paid'
+            ? totalAmount
+            : 0;
+        ret.paidAmount = paidAmount;
+        ret.remainingAmount = typeof ret.remainingAmount === 'number'
+          ? ret.remainingAmount
+          : ret.status === 'paid'
+            ? 0
+            : Math.max(0, totalAmount - paidAmount);
+        ret.payments = Array.isArray(ret.payments) ? ret.payments : [];
         if (ret.lineItems) {
           ret.lineItems = ret.lineItems.map((item) => ({
             ...item,

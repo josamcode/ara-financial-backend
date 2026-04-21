@@ -46,6 +46,7 @@ const markSentSchema = z.object({
 
 const recordPaymentSchema = z.object({
   cashAccountId: z.string().min(1, 'Cash/Bank account required'),
+  amount: monetaryAmount,
   paymentDate: z.string().refine((v) => !isNaN(Date.parse(v)), 'Valid date required').optional(),
 });
 
