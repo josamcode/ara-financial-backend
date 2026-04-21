@@ -4,9 +4,17 @@ const mongoose = require('mongoose');
 const { Bill } = require('./bill.model');
 const BillCounter = require('./billCounter.model');
 const { Supplier } = require('../supplier/supplier.model');
+const journalService = require('../journal/journal.service');
 const auditService = require('../audit/audit.service');
-const { NotFoundError } = require('../../common/errors');
+const { BadRequestError, NotFoundError } = require('../../common/errors');
 const logger = require('../../config/logger');
+const {
+  PAYABLE_BILL_STATUSES,
+  resolveBillPaidAmount,
+  resolveBillRemainingAmount,
+  resolveBillTotalAmount,
+  roundMonetaryAmount,
+} = require('./bill-status');
 
 class BillService {
   async createBill(tenantId, userId, data, options = {}) {
@@ -33,6 +41,9 @@ class BillService {
       lineItems: this._buildLineItems(data.lineItems),
       subtotal: mongoose.Types.Decimal128.fromString(data.subtotal),
       total: mongoose.Types.Decimal128.fromString(data.total),
+      paidAmount: 0,
+      remainingAmount: Number(data.total),
+      payments: [],
       notes: data.notes || '',
       status: 'draft',
       createdBy: userId,
@@ -91,9 +102,187 @@ class BillService {
   async getBillById(billId, tenantId) {
     const bill = await Bill.findOne({ _id: billId, tenantId })
       .populate({ path: 'createdBy', select: 'name email', match: { tenantId } })
-      .populate({ path: 'supplierId', select: 'name email phone', match: { tenantId } });
+      .populate({ path: 'supplierId', select: 'name email phone', match: { tenantId } })
+      .populate({
+        path: 'apAccountId',
+        select: 'code nameAr nameEn',
+        match: { tenantId },
+      })
+      .populate({
+        path: 'postedJournalEntryId',
+        select: 'entryNumber date status',
+        match: { tenantId },
+      })
+      .populate({
+        path: 'paymentJournalEntryId',
+        select: 'entryNumber date status',
+        match: { tenantId },
+      })
+      .populate({
+        path: 'payments.accountId',
+        select: 'code nameAr nameEn',
+        match: { tenantId },
+      })
+      .populate({
+        path: 'payments.journalEntryId',
+        select: 'entryNumber date status',
+        match: { tenantId },
+      });
 
     if (!bill) throw new NotFoundError('Bill not found');
+    return bill;
+  }
+
+  async postBill(billId, tenantId, userId, { apAccountId, debitAccountId }, options = {}) {
+    const bill = await Bill.findOne({ _id: billId, tenantId });
+    if (!bill) throw new NotFoundError('Bill not found');
+    if (bill.status !== 'draft') {
+      throw new BadRequestError('Only draft bills can be posted');
+    }
+
+    const totalStr = bill.total.toString();
+    const postDescription = `Bill posted - ${bill.billNumber}`;
+
+    const entry = await journalService.createEntry(
+      tenantId,
+      userId,
+      {
+        date: bill.issueDate.toISOString(),
+        description: postDescription,
+        reference: bill.billNumber,
+        lines: [
+          { accountId: debitAccountId, debit: totalStr, credit: '0' },
+          { accountId: apAccountId, debit: '0', credit: totalStr },
+        ].map((line) => ({ ...line, description: postDescription })),
+      },
+      { auditContext: options.auditContext }
+    );
+
+    await journalService.postEntry(entry._id, tenantId, userId, { auditContext: options.auditContext });
+
+    bill.status = 'posted';
+    bill.apAccountId = apAccountId;
+    bill.paidAmount = 0;
+    bill.remainingAmount = roundMonetaryAmount(Number(totalStr));
+    bill.postedAt = new Date();
+    bill.postedJournalEntryId = entry._id;
+    await bill.save();
+
+    await auditService.log({
+      tenantId,
+      userId,
+      action: 'bill.posted',
+      resourceType: 'Bill',
+      resourceId: bill._id,
+      newValues: { billNumber: bill.billNumber, journalEntryId: entry._id },
+      auditContext: options.auditContext,
+    });
+
+    logger.info({ tenantId, billId, entryId: entry._id }, 'Bill posted');
+    return bill;
+  }
+
+  async recordPayment(billId, tenantId, userId, { cashAccountId, amount, paymentDate }, options = {}) {
+    const bill = await Bill.findOne({ _id: billId, tenantId });
+    if (!bill) throw new NotFoundError('Bill not found');
+    if (!PAYABLE_BILL_STATUSES.includes(bill.status)) {
+      throw new BadRequestError('Only posted, overdue, or partially paid bills can be paid');
+    }
+
+    const totalAmount = resolveBillTotalAmount(bill);
+    const paidAmount = resolveBillPaidAmount(bill, totalAmount);
+    const remainingAmount = resolveBillRemainingAmount(bill, totalAmount, paidAmount);
+    const paymentAmount = roundMonetaryAmount(Number(amount));
+
+    if (!Number.isFinite(paymentAmount) || paymentAmount <= 0) {
+      throw new BadRequestError('Payment amount must be greater than zero');
+    }
+    if (paymentAmount > remainingAmount) {
+      throw new BadRequestError('Payment amount cannot exceed remaining amount');
+    }
+
+    const apAccountId = bill.apAccountId?._id
+      ? bill.apAccountId._id.toString()
+      : bill.apAccountId?.toString();
+    if (!apAccountId) {
+      throw new BadRequestError('Bill has no stored accounts payable account');
+    }
+
+    const amountStr = paymentAmount.toFixed(6).replace(/\.?0+$/, '');
+    const date = paymentDate ? new Date(paymentDate) : new Date();
+    const paymentDescription = `Bill payment - ${bill.billNumber}`;
+
+    const entry = await journalService.createEntry(
+      tenantId,
+      userId,
+      {
+        date: date.toISOString(),
+        description: paymentDescription,
+        reference: bill.billNumber,
+        lines: [
+          { accountId: apAccountId, debit: amountStr, credit: '0' },
+          { accountId: cashAccountId, debit: '0', credit: amountStr },
+        ].map((line) => ({ ...line, description: paymentDescription })),
+      },
+      { auditContext: options.auditContext }
+    );
+
+    await journalService.postEntry(entry._id, tenantId, userId, { auditContext: options.auditContext });
+
+    bill.paidAmount = roundMonetaryAmount(paidAmount + paymentAmount);
+    bill.remainingAmount = roundMonetaryAmount(totalAmount - bill.paidAmount);
+    if (bill.remainingAmount < 0) bill.remainingAmount = 0;
+    bill.payments.push({
+      amount: paymentAmount,
+      date,
+      accountId: cashAccountId,
+      journalEntryId: entry._id,
+    });
+    bill.status = bill.remainingAmount === 0
+      ? 'paid'
+      : bill.paidAmount > 0
+        ? 'partially_paid'
+        : 'posted';
+    bill.paidAt = bill.remainingAmount === 0 ? new Date() : null;
+    bill.paymentJournalEntryId = entry._id;
+    await bill.save();
+
+    await auditService.log({
+      tenantId,
+      userId,
+      action: 'bill.paid',
+      resourceType: 'Bill',
+      resourceId: bill._id,
+      newValues: { billNumber: bill.billNumber, journalEntryId: entry._id, amount: paymentAmount },
+      auditContext: options.auditContext,
+    });
+
+    logger.info({ tenantId, billId, entryId: entry._id, amount: paymentAmount }, 'Bill payment recorded');
+    return bill;
+  }
+
+  async cancelBill(billId, tenantId, userId, options = {}) {
+    const bill = await Bill.findOne({ _id: billId, tenantId });
+    if (!bill) throw new NotFoundError('Bill not found');
+    if (['paid', 'cancelled'].includes(bill.status)) {
+      throw new BadRequestError('Paid or already cancelled bills cannot be cancelled');
+    }
+
+    bill.status = 'cancelled';
+    bill.cancelledAt = new Date();
+    await bill.save();
+
+    await auditService.log({
+      tenantId,
+      userId,
+      action: 'bill.cancelled',
+      resourceType: 'Bill',
+      resourceId: bill._id,
+      newValues: { billNumber: bill.billNumber },
+      auditContext: options.auditContext,
+    });
+
+    logger.info({ tenantId, billId }, 'Bill cancelled');
     return bill;
   }
 

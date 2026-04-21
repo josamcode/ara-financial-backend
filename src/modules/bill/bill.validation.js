@@ -26,6 +26,19 @@ const createBillSchema = z.object({
   notes: z.string().max(2000).optional().default(''),
 });
 
+const postBillSchema = z.object({
+  apAccountId: z.string().min(1, 'Accounts Payable account required'),
+  debitAccountId: z.string().min(1, 'Debit account required'),
+});
+
+const recordBillPaymentSchema = z.object({
+  cashAccountId: z.string().min(1, 'Cash/Bank account required'),
+  amount: monetaryAmount,
+  paymentDate: z.string().refine((value) => !isNaN(Date.parse(value)), 'Valid date required').optional(),
+});
+
 module.exports = {
   createBillSchema,
+  postBillSchema,
+  recordBillPaymentSchema,
 };

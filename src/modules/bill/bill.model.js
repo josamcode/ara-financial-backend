@@ -3,8 +3,14 @@
 const mongoose = require('mongoose');
 const tenantPlugin = require('../../common/plugins/tenantPlugin');
 const softDeletePlugin = require('../../common/plugins/softDeletePlugin');
+const {
+  resolveBillPaidAmount,
+  resolveBillRemainingAmount,
+  resolveBillStatus,
+  resolveBillTotalAmount,
+} = require('./bill-status');
 
-const BILL_STATUSES = ['draft'];
+const BILL_STATUSES = ['draft', 'posted', 'partially_paid', 'paid', 'overdue', 'cancelled'];
 
 const lineItemSchema = new mongoose.Schema(
   {
@@ -12,6 +18,24 @@ const lineItemSchema = new mongoose.Schema(
     quantity: { type: mongoose.Schema.Types.Decimal128, required: true },
     unitPrice: { type: mongoose.Schema.Types.Decimal128, required: true },
     lineTotal: { type: mongoose.Schema.Types.Decimal128, required: true },
+  },
+  { _id: true }
+);
+
+const paymentSchema = new mongoose.Schema(
+  {
+    amount: { type: Number, required: true, min: 0 },
+    date: { type: Date, required: true, default: Date.now },
+    accountId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Account',
+      required: true,
+    },
+    journalEntryId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'JournalEntry',
+      required: true,
+    },
   },
   { _id: true }
 );
@@ -29,8 +53,34 @@ const billSchema = new mongoose.Schema(
     lineItems: { type: [lineItemSchema], default: [] },
     subtotal: { type: mongoose.Schema.Types.Decimal128, required: true },
     total: { type: mongoose.Schema.Types.Decimal128, required: true },
+    paidAmount: { type: Number, default: 0 },
+    remainingAmount: {
+      type: Number,
+      default() {
+        return Number(this.total?.toString?.() ?? this.total ?? 0);
+      },
+    },
+    payments: { type: [paymentSchema], default: [] },
     notes: { type: String, trim: true, maxlength: 2000, default: '' },
+    apAccountId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Account',
+      default: null,
+    },
+    postedJournalEntryId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'JournalEntry',
+      default: null,
+    },
+    paymentJournalEntryId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'JournalEntry',
+      default: null,
+    },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    postedAt: { type: Date, default: null },
+    paidAt: { type: Date, default: null },
+    cancelledAt: { type: Date, default: null },
   },
   {
     timestamps: true,
@@ -40,6 +90,11 @@ const billSchema = new mongoose.Schema(
 
         ret.subtotal = dec(ret.subtotal);
         ret.total = dec(ret.total);
+        const totalAmount = resolveBillTotalAmount(ret);
+        ret.paidAmount = resolveBillPaidAmount(ret, totalAmount);
+        ret.remainingAmount = resolveBillRemainingAmount(ret, totalAmount, ret.paidAmount);
+        ret.status = resolveBillStatus(ret);
+        ret.payments = Array.isArray(ret.payments) ? ret.payments : [];
         if (ret.lineItems) {
           ret.lineItems = ret.lineItems.map((item) => ({
             ...item,

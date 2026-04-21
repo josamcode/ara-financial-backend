@@ -37,6 +37,41 @@ class BillController {
     const bill = await billService.getBillById(req.params.id, req.user.tenantId);
     return success(res, { bill });
   }
+
+  async post(req, res) {
+    const auditContext = getAuditContext(req);
+    const bill = await billService.postBill(
+      req.params.id,
+      req.user.tenantId,
+      req.user.userId,
+      req.body,
+      { auditContext }
+    );
+    return success(res, { bill });
+  }
+
+  async recordPayment(req, res) {
+    const auditContext = getAuditContext(req);
+    const bill = await billService.recordPayment(
+      req.params.id,
+      req.user.tenantId,
+      req.user.userId,
+      req.body,
+      { auditContext }
+    );
+    return success(res, { bill });
+  }
+
+  async cancel(req, res) {
+    const auditContext = getAuditContext(req);
+    const bill = await billService.cancelBill(
+      req.params.id,
+      req.user.tenantId,
+      req.user.userId,
+      { auditContext }
+    );
+    return success(res, { bill });
+  }
 }
 
 module.exports = new BillController();
