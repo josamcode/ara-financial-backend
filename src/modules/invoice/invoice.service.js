@@ -73,8 +73,16 @@ class InvoiceService {
   async getInvoiceById(invoiceId, tenantId) {
     const invoice = await Invoice.findOne({ _id: invoiceId, tenantId })
       .populate({ path: 'createdBy', select: 'name email', match: { tenantId } })
-      .populate({ path: 'sentJournalEntryId', select: 'entryNumber date status' })
-      .populate({ path: 'paymentJournalEntryId', select: 'entryNumber date status' });
+      .populate({
+        path: 'sentJournalEntryId',
+        select: 'entryNumber date status',
+        match: { tenantId },
+      })
+      .populate({
+        path: 'paymentJournalEntryId',
+        select: 'entryNumber date status',
+        match: { tenantId },
+      });
 
     if (!invoice) throw new NotFoundError('Invoice not found');
     return invoice;
