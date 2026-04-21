@@ -42,6 +42,13 @@ const PERMISSIONS = {
   FISCAL_UPDATE: 'fiscal:update',
   FISCAL_LOCK: 'fiscal:lock',
 
+  // Invoice permissions
+  INVOICE_READ: 'invoice:read',
+  INVOICE_CREATE: 'invoice:create',
+  INVOICE_UPDATE: 'invoice:update',
+  INVOICE_DELETE: 'invoice:delete',
+  INVOICE_SEND: 'invoice:send',
+
   // Audit permissions
   AUDIT_READ: 'audit:read',
 
@@ -83,6 +90,10 @@ const DEFAULT_ROLES = {
       PERMISSIONS.DASHBOARD_VIEW,
       PERMISSIONS.USER_READ,
       PERMISSIONS.TENANT_READ,
+      PERMISSIONS.INVOICE_READ,
+      PERMISSIONS.INVOICE_CREATE,
+      PERMISSIONS.INVOICE_UPDATE,
+      PERMISSIONS.INVOICE_SEND,
     ],
     isSystem: true,
   },

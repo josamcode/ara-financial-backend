@@ -67,6 +67,7 @@ function createApp() {
   const reportRoutes = require('./modules/report/report.routes');
   const dashboardRoutes = require('./modules/dashboard/dashboard.routes');
   const auditRoutes = require('./modules/audit/audit.routes');
+  const invoiceRoutes = require('./modules/invoice/invoice.routes');
 
   app.use('/api/v1/auth', authRoutes);
   app.use('/api/v1/users', userRoutes);
@@ -78,6 +79,7 @@ function createApp() {
   app.use('/api/v1/reports', reportRoutes);
   app.use('/api/v1/dashboard', dashboardRoutes);
   app.use('/api/v1/audit-logs', auditRoutes);
+  app.use('/api/v1/invoices', invoiceRoutes);
 
   // ── 404 handler ────────────────────────────────
   app.use((_req, _res, next) => {
