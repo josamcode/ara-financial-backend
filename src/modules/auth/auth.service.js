@@ -8,7 +8,7 @@ const { getRedisClient } = require('../../config/redis');
 const logger = require('../../config/logger');
 const User = require('../user/user.model');
 const Tenant = require('../tenant/tenant.model');
-const { Role, seedDefaultRoles } = require('./role.model');
+const { Role, seedDefaultRoles, getEffectivePermissions } = require('./role.model');
 const auditService = require('../audit/audit.service');
 const {
   UnauthorizedError,
@@ -481,7 +481,7 @@ class AuthService {
     const user = await User.findOne({ _id: userId, tenantId })
       .populate({
         path: 'roleId',
-        select: 'name label permissions',
+        select: 'name label permissions isSystem',
         match: { tenantId },
       });
 
@@ -489,16 +489,22 @@ class AuthService {
       throw new NotFoundError('User not found');
     }
 
-    return user.toJSON();
+    const payload = user.toJSON();
+    if (payload.roleId) {
+      payload.roleId.permissions = getEffectivePermissions(user.roleId);
+    }
+
+    return payload;
   }
 
   async _generateTokens(user, role) {
+    const effectivePermissions = getEffectivePermissions(role);
     const tokenPayload = {
       userId: user._id.toString(),
       tenantId: user.tenantId.toString(),
       roleId: role._id.toString(),
       roleName: role.name,
-      permissions: role.permissions,
+      permissions: effectivePermissions,
     };
 
     const accessToken = jwt.sign(tokenPayload, config.jwt.secret, {

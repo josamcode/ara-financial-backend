@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken');
 const config = require('../../config');
 const { UnauthorizedError, ForbiddenError } = require('../../common/errors');
 const User = require('../../modules/user/user.model');
+const { getEffectivePermissions } = require('../../modules/auth/role.model');
 
 /**
  * Authenticates the request by verifying the JWT access token.
@@ -39,7 +40,7 @@ function authenticate(req, _res, next) {
         isActive: true,
       }).populate({
         path: 'roleId',
-        select: 'name permissions',
+        select: 'name permissions isSystem',
         match: { tenantId: decoded.tenantId },
       });
 
@@ -56,7 +57,7 @@ function authenticate(req, _res, next) {
         tenantId: user.tenantId.toString(),
         roleId: user.roleId._id.toString(),
         roleName: user.roleId.name,
-        permissions: user.roleId.permissions || [],
+        permissions: getEffectivePermissions(user.roleId),
       };
     })
     .then(() => next())

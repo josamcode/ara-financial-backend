@@ -69,6 +69,8 @@ function createApp() {
   const auditRoutes = require('./modules/audit/audit.routes');
   const invoiceRoutes = require('./modules/invoice/invoice.routes');
   const customerRoutes = require('./modules/customer/customer.routes');
+  const supplierRoutes = require('./modules/supplier/supplier.routes');
+  const billRoutes = require('./modules/bill/bill.routes');
 
   app.use('/api/v1/auth', authRoutes);
   app.use('/api/v1/users', userRoutes);
@@ -82,6 +84,8 @@ function createApp() {
   app.use('/api/v1/audit-logs', auditRoutes);
   app.use('/api/v1/invoices', invoiceRoutes);
   app.use('/api/v1/customers', customerRoutes);
+  app.use('/api/v1/suppliers', supplierRoutes);
+  app.use('/api/v1/bills', billRoutes);
 
   // ── 404 handler ────────────────────────────────
   app.use((_req, _res, next) => {

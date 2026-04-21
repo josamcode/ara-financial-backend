@@ -55,6 +55,16 @@ const PERMISSIONS = {
   CUSTOMER_UPDATE: 'customer:update',
   CUSTOMER_DELETE: 'customer:delete',
 
+  // Supplier permissions
+  SUPPLIER_READ: 'supplier:read',
+  SUPPLIER_CREATE: 'supplier:create',
+  SUPPLIER_UPDATE: 'supplier:update',
+  SUPPLIER_DELETE: 'supplier:delete',
+
+  // Bill permissions
+  BILL_READ: 'bill:read',
+  BILL_CREATE: 'bill:create',
+
   // Audit permissions
   AUDIT_READ: 'audit:read',
 
@@ -103,10 +113,26 @@ const DEFAULT_ROLES = {
       PERMISSIONS.CUSTOMER_READ,
       PERMISSIONS.CUSTOMER_CREATE,
       PERMISSIONS.CUSTOMER_UPDATE,
+      PERMISSIONS.SUPPLIER_READ,
+      PERMISSIONS.SUPPLIER_CREATE,
+      PERMISSIONS.SUPPLIER_UPDATE,
+      PERMISSIONS.BILL_READ,
+      PERMISSIONS.BILL_CREATE,
     ],
     isSystem: true,
   },
 };
+
+function getEffectivePermissions(role) {
+  if (!role) return [];
+
+  const storedPermissions = Array.isArray(role.permissions) ? role.permissions : [];
+  const defaultPermissions = role.isSystem && DEFAULT_ROLES[role.name]
+    ? DEFAULT_ROLES[role.name].permissions
+    : [];
+
+  return [...new Set([...storedPermissions, ...defaultPermissions])];
+}
 
 const roleSchema = new mongoose.Schema(
   {
@@ -164,4 +190,4 @@ async function seedDefaultRoles(tenantId, options = {}) {
   }, {});
 }
 
-module.exports = { Role, PERMISSIONS, DEFAULT_ROLES, seedDefaultRoles };
+module.exports = { Role, PERMISSIONS, DEFAULT_ROLES, seedDefaultRoles, getEffectivePermissions };
