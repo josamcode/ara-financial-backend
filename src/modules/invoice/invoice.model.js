@@ -30,6 +30,11 @@ const invoiceSchema = new mongoose.Schema(
     total: { type: mongoose.Schema.Types.Decimal128, required: true },
     notes: { type: String, trim: true, maxlength: 2000, default: '' },
     // Accounting links
+    arAccountId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Account',
+      default: null,
+    },
     sentJournalEntryId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'JournalEntry',

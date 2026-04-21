@@ -154,6 +154,7 @@ class InvoiceService {
     await journalService.postEntry(entry._id, tenantId, userId, { auditContext: options.auditContext });
 
     invoice.status = 'sent';
+    invoice.arAccountId = arAccountId;
     invoice.sentAt = new Date();
     invoice.sentJournalEntryId = entry._id;
     await invoice.save();
@@ -182,20 +183,14 @@ class InvoiceService {
     if (!['sent', 'overdue'].includes(invoice.status)) {
       throw new BadRequestError('Only sent or overdue invoices can be marked as paid');
     }
-    if (!invoice.sentJournalEntryId) {
-      throw new BadRequestError('Invoice has no linked journal entry for accounts receivable');
-    }
-
     const totalStr = invoice.total.toString();
     const date = paymentDate ? new Date(paymentDate) : new Date();
-
-    // Find the AR account from the sent journal entry
-    const sentEntry = await journalService.getEntryById(invoice.sentJournalEntryId, tenantId);
-    const arLine = sentEntry.lines.find((l) => l.debit && l.debit.toString() !== '0');
-    if (!arLine) throw new BadRequestError('Cannot determine AR account from invoice journal entry');
-    const arAccountId = arLine.accountId._id
-      ? arLine.accountId._id.toString()
-      : arLine.accountId.toString();
+    const arAccountId = invoice.arAccountId?._id
+      ? invoice.arAccountId._id.toString()
+      : invoice.arAccountId?.toString();
+    if (!arAccountId) {
+      throw new BadRequestError('Invoice has no stored accounts receivable account');
+    }
 
     const entry = await journalService.createEntry(
       tenantId,
