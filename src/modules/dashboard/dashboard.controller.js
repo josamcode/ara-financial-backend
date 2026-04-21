@@ -11,7 +11,12 @@ class DashboardController {
       dashboardService.getARAPSummary(req.user.tenantId),
       dashboardService.getRecentActivity(req.user.tenantId),
     ]);
-    return success(res, { financials, stats, arap, activity });
+    const insights = await dashboardService.getInsights(req.user.tenantId, {
+      financials,
+      arap,
+    });
+
+    return success(res, { financials, stats, arap, activity, insights });
   }
 }
 

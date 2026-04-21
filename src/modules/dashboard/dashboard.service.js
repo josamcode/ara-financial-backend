@@ -11,6 +11,43 @@ const {
   formatScaledInteger,
 } = require('../../common/utils/money');
 
+const DASHBOARD_INSIGHT_ROUTES = Object.freeze({
+  invoices: '/invoices',
+  bills: '/bills',
+  customers: '/customers',
+  suppliers: '/suppliers',
+  incomeStatement: '/reports/income-statement',
+});
+
+function getOutstandingFilters(tenantId) {
+  const tid = new mongoose.Types.ObjectId(tenantId);
+  const today = new Date();
+  const todayStart = new Date(
+    Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate())
+  );
+
+  return {
+    tid,
+    todayStart,
+    arFilter: {
+      tenantId: tid,
+      status: { $in: ['sent', 'partially_paid'] },
+      remainingAmount: { $gt: 0 },
+      deletedAt: null,
+    },
+    apFilter: {
+      tenantId: tid,
+      status: { $in: ['posted', 'partially_paid'] },
+      remainingAmount: { $gt: 0 },
+      deletedAt: null,
+    },
+  };
+}
+
+function buildEntityRoute(basePath, entityId) {
+  return entityId ? `${basePath}/${entityId}` : basePath;
+}
+
 /**
  * Dashboard service providing summary data for the main dashboard.
  */
@@ -91,12 +128,7 @@ class DashboardService {
    * Get AR/AP outstanding balances and overdue counts.
    */
   async getARAPSummary(tenantId) {
-    const tid = new mongoose.Types.ObjectId(tenantId);
-    const today = new Date();
-    const todayStart = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()));
-
-    const arFilter = { tenantId: tid, status: { $in: ['sent', 'partially_paid'] }, remainingAmount: { $gt: 0 }, deletedAt: null };
-    const apFilter = { tenantId: tid, status: { $in: ['posted', 'partially_paid'] }, remainingAmount: { $gt: 0 }, deletedAt: null };
+    const { arFilter, apFilter, todayStart } = getOutstandingFilters(tenantId);
 
     const [arResult, apResult, overdueInvoices, overdueBills] = await Promise.all([
       Invoice.aggregate([
@@ -117,6 +149,146 @@ class DashboardService {
       overdueInvoices,
       overdueBills,
     };
+  }
+
+  /**
+   * Get dashboard insights derived from existing summary data.
+   */
+  async getInsights(tenantId, { financials, arap } = {}) {
+    const { arFilter, apFilter } = getOutstandingFilters(tenantId);
+
+    const [topCustomer, topSupplier] = await Promise.all([
+      Invoice.aggregate([
+        { $match: arFilter },
+        {
+          $group: {
+            _id: {
+              customerRef: { $ifNull: ['$customerId', '$customerName'] },
+              customerId: '$customerId',
+            },
+            customerName: { $first: '$customerName' },
+            outstandingAmount: { $sum: '$remainingAmount' },
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+            customerId: '$_id.customerId',
+            customerName: 1,
+            outstandingAmount: 1,
+          },
+        },
+        { $sort: { outstandingAmount: -1, customerName: 1 } },
+        { $limit: 1 },
+      ]),
+      Bill.aggregate([
+        { $match: apFilter },
+        {
+          $group: {
+            _id: {
+              supplierRef: { $ifNull: ['$supplierId', '$supplierName'] },
+              supplierId: '$supplierId',
+            },
+            supplierName: { $first: '$supplierName' },
+            outstandingAmount: { $sum: '$remainingAmount' },
+          },
+        },
+        {
+          $project: {
+            _id: 0,
+            supplierId: '$_id.supplierId',
+            supplierName: 1,
+            outstandingAmount: 1,
+          },
+        },
+        { $sort: { outstandingAmount: -1, supplierName: 1 } },
+        { $limit: 1 },
+      ]),
+    ]);
+
+    const insights = [];
+
+    if ((arap?.overdueInvoices ?? 0) > 0) {
+      insights.push({
+        id: 'overdue_invoices',
+        tone: 'danger',
+        href: DASHBOARD_INSIGHT_ROUTES.invoices,
+        count: arap.overdueInvoices,
+      });
+    } else {
+      insights.push({
+        id: 'no_overdue_invoices',
+        tone: 'success',
+        href: DASHBOARD_INSIGHT_ROUTES.invoices,
+      });
+    }
+
+    if ((arap?.overdueBills ?? 0) > 0) {
+      insights.push({
+        id: 'overdue_bills',
+        tone: 'warning',
+        href: DASHBOARD_INSIGHT_ROUTES.bills,
+        count: arap.overdueBills,
+      });
+    } else {
+      insights.push({
+        id: 'no_overdue_bills',
+        tone: 'success',
+        href: DASHBOARD_INSIGHT_ROUTES.bills,
+      });
+    }
+
+    if ((topCustomer[0]?.outstandingAmount ?? 0) > 0) {
+      insights.push({
+        id: 'top_customer_outstanding',
+        tone: 'info',
+        href: buildEntityRoute(
+          DASHBOARD_INSIGHT_ROUTES.customers,
+          topCustomer[0].customerId?.toString()
+        ),
+        customerName: topCustomer[0].customerName,
+        amount: topCustomer[0].outstandingAmount,
+      });
+    }
+
+    if ((topSupplier[0]?.outstandingAmount ?? 0) > 0) {
+      insights.push({
+        id: 'top_supplier_payable',
+        tone: 'warning',
+        href: buildEntityRoute(
+          DASHBOARD_INSIGHT_ROUTES.suppliers,
+          topSupplier[0].supplierId?.toString()
+        ),
+        supplierName: topSupplier[0].supplierName,
+        amount: topSupplier[0].outstandingAmount,
+      });
+    }
+
+    const netIncome = toScaledInteger(financials?.netIncome ?? '0');
+
+    if (netIncome > 0n) {
+      insights.push({
+        id: 'net_income_positive',
+        tone: 'success',
+        href: DASHBOARD_INSIGHT_ROUTES.incomeStatement,
+        amount: financials.netIncome,
+      });
+    } else if (netIncome < 0n) {
+      insights.push({
+        id: 'net_income_negative',
+        tone: 'danger',
+        href: DASHBOARD_INSIGHT_ROUTES.incomeStatement,
+        amount: financials.netIncome,
+      });
+    } else {
+      insights.push({
+        id: 'net_income_neutral',
+        tone: 'info',
+        href: DASHBOARD_INSIGHT_ROUTES.incomeStatement,
+      });
+    }
+
+    return insights.slice(0, 5);
   }
 
   /**
