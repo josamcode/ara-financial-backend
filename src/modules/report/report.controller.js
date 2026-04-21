@@ -173,6 +173,11 @@ class ReportController {
     return success(res, report);
   }
 
+  async apAging(req, res) {
+    const report = await reportService.getAPAging(req.user.tenantId, req.query);
+    return success(res, report);
+  }
+
   async exportTrialBalance(req, res) {
     const report = await reportService.getTrialBalance(req.user.tenantId, req.query);
     return sendExport(res, {

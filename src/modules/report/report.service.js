@@ -9,6 +9,11 @@ const { JournalEntry } = require('../journal/journal.model');
 const { Account } = require('../account/account.model');
 const { FiscalPeriod } = require('../fiscal-period/fiscalPeriod.model');
 const { Invoice } = require('../invoice/invoice.model');
+const { Bill } = require('../bill/bill.model');
+const {
+  PAYABLE_BILL_STATUSES,
+  resolveBillRemainingAmount,
+} = require('../bill/bill-status');
 const fiscalPeriodService = require('../fiscal-period/fiscalPeriod.service');
 const { BadRequestError } = require('../../common/errors');
 const {
@@ -21,6 +26,7 @@ const CURRENT_YEAR_EARNINGS_CODE = '3300';
 const RETAINED_EARNINGS_CODE = '3200';
 const CASH_ACCOUNT_PREFIXES = ['111'];
 const AR_AGING_ELIGIBLE_STATUSES = ['sent', 'partially_paid', 'overdue'];
+const AP_AGING_ELIGIBLE_STATUSES = PAYABLE_BILL_STATUSES;
 
 const WORKING_CAPITAL_RULES = Object.freeze([
   { code: '1120', label: 'Accounts Receivable', section: 'operating', multiplier: -1n },
@@ -214,6 +220,84 @@ class ReportService {
           totalOutstanding: formatScaledInteger(totalOutstanding),
           customersWithOutstanding: rows.length,
           overdueInvoicesCount,
+        },
+        rows,
+        asOfDate: toIsoString(primaryParams.asOfDate),
+      };
+    });
+  }
+
+  async getAPAging(tenantId, params = {}) {
+    const primaryParams = this._normalizeOptionalAsOfParams(params, 'AP Aging');
+
+    return this._getCachedReport('ap-aging', tenantId, primaryParams, async () => {
+      const bills = await Bill.find({
+        tenantId,
+        deletedAt: null,
+        status: { $in: AP_AGING_ELIGIBLE_STATUSES },
+      })
+        .select('supplierId supplierName issueDate dueDate total paidAmount remainingAmount status')
+        .lean();
+
+      const supplierRows = new Map();
+      let totalOutstanding = 0n;
+      let overdueBillsCount = 0;
+
+      for (const bill of bills) {
+        const remainingAmount = this._resolveBillRemainingScaledAmount(bill);
+        if (remainingAmount <= 0n) {
+          continue;
+        }
+
+        const supplierId = bill.supplierId?.toString?.() ?? null;
+        const supplierName = bill.supplierName || '-';
+        const supplierKey = supplierId || `name:${supplierName}`;
+        const referenceDate = bill.dueDate || bill.issueDate;
+        const daysPastDue = this._getDaysPastDue(primaryParams.asOfDate, referenceDate);
+        const bucketKey = this._getARAgingBucketKey(daysPastDue);
+
+        if (!supplierRows.has(supplierKey)) {
+          supplierRows.set(supplierKey, {
+            supplierId,
+            supplierName,
+            days0_30: 0n,
+            days31_60: 0n,
+            days61_90: 0n,
+            days90Plus: 0n,
+            totalOutstanding: 0n,
+          });
+        }
+
+        const row = supplierRows.get(supplierKey);
+        row[bucketKey] += remainingAmount;
+        row.totalOutstanding += remainingAmount;
+        totalOutstanding += remainingAmount;
+
+        if (daysPastDue > 0) {
+          overdueBillsCount += 1;
+        }
+      }
+
+      const rows = Array.from(supplierRows.values())
+        .sort((left, right) => (
+          left.supplierName.localeCompare(right.supplierName)
+          || String(left.supplierId || '').localeCompare(String(right.supplierId || ''))
+        ))
+        .map((row) => ({
+          supplierId: row.supplierId,
+          supplierName: row.supplierName,
+          days0_30: formatScaledInteger(row.days0_30),
+          days31_60: formatScaledInteger(row.days31_60),
+          days61_90: formatScaledInteger(row.days61_90),
+          days90Plus: formatScaledInteger(row.days90Plus),
+          totalOutstanding: formatScaledInteger(row.totalOutstanding),
+        }));
+
+      return {
+        summary: {
+          totalOutstanding: formatScaledInteger(totalOutstanding),
+          suppliersWithOutstanding: rows.length,
+          overdueBillsCount,
         },
         rows,
         asOfDate: toIsoString(primaryParams.asOfDate),
@@ -811,7 +895,7 @@ class ReportService {
   }
 
   async _getReportCacheVersion(tenantId) {
-    const [latestJournalEntry, latestAccount, latestFiscalPeriod, latestInvoice] = await Promise.all([
+    const [latestJournalEntry, latestAccount, latestFiscalPeriod, latestInvoice, latestBill] = await Promise.all([
       JournalEntry.findOne({ tenantId })
         .sort({ updatedAt: -1 })
         .select('updatedAt')
@@ -827,6 +911,10 @@ class ReportService {
         .sort({ updatedAt: -1 })
         .select('updatedAt')
         .setOptions({ __includeDeleted: true }),
+      Bill.findOne({ tenantId })
+        .sort({ updatedAt: -1 })
+        .select('updatedAt')
+        .setOptions({ __includeDeleted: true }),
     ]);
 
     return [
@@ -834,6 +922,7 @@ class ReportService {
       latestAccount?.updatedAt?.toISOString() || 'noaccounts',
       latestFiscalPeriod?.updatedAt?.toISOString() || 'noperiods',
       latestInvoice?.updatedAt?.toISOString() || 'noinvoices',
+      latestBill?.updatedAt?.toISOString() || 'nobills',
     ].join('|');
   }
 
@@ -1095,6 +1184,11 @@ class ReportService {
     const remainingAmount = totalAmount - paidAmount;
 
     return remainingAmount > 0n ? remainingAmount : 0n;
+  }
+
+  _resolveBillRemainingScaledAmount(bill) {
+    const remainingAmount = resolveBillRemainingAmount(bill);
+    return remainingAmount > 0 ? toScaledInteger(remainingAmount.toString()) : 0n;
   }
 
   _getDaysPastDue(asOfDate, referenceDateValue) {

@@ -33,6 +33,11 @@ const controller = {
     res.json({ success: true, data: { supplier } });
   },
 
+  async getStatement(req, res) {
+    const result = await supplierService.getSupplierStatement(req.params.id, req.tenantId);
+    res.json({ success: true, data: result });
+  },
+
   async create(req, res) {
     const supplier = await supplierService.createSupplier(
       req.tenantId,

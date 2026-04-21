@@ -5,7 +5,9 @@ const assert = require('node:assert/strict');
 const reportService = require('../src/modules/report/report.service');
 const fiscalPeriodService = require('../src/modules/fiscal-period/fiscalPeriod.service');
 const customerService = require('../src/modules/customer/customer.service');
+const supplierService = require('../src/modules/supplier/supplier.service');
 const invoiceService = require('../src/modules/invoice/invoice.service');
+const billService = require('../src/modules/bill/bill.service');
 const { Invoice } = require('../src/modules/invoice/invoice.model');
 const {
   ensureDatabase,
@@ -488,4 +490,343 @@ test('ar aging report groups outstanding balances by customer and aging bucket',
   assert.ok(invoiceA1);
   assert.ok(invoiceB1);
   assert.ok(invoiceB2);
+});
+
+test('supplier statement combines bills and payments into a payable running balance', async () => {
+  const fixture = await createTenantFixture({ fiscalYear: 2026 });
+  tenantIds.add(fixture.tenant._id);
+
+  const accounts = await getAccountsByCode(fixture.tenant._id, ['1111', '2110', '5200']);
+  const cashAccountId = accounts.get('1111')._id.toString();
+  const apAccountId = accounts.get('2110')._id.toString();
+  const debitAccountId = accounts.get('5200')._id.toString();
+
+  const supplier = await supplierService.createSupplier(
+    fixture.tenant._id,
+    fixture.user._id,
+    { name: 'Cairo Industrial', email: 'cairo@example.com' },
+    { auditContext: fixture.auditContext }
+  );
+
+  async function createPostedBill({ amount, issueDate, dueDate }) {
+    const bill = await billService.createBill(
+      fixture.tenant._id,
+      fixture.user._id,
+      {
+        supplierId: supplier._id.toString(),
+        supplierName: supplier.name,
+        supplierEmail: supplier.email,
+        issueDate,
+        dueDate,
+        currency: 'EGP',
+        lineItems: [
+          {
+            description: 'Expense line',
+            quantity: '1',
+            unitPrice: amount,
+            lineTotal: amount,
+          },
+        ],
+        subtotal: amount,
+        total: amount,
+        notes: '',
+      },
+      { auditContext: fixture.auditContext }
+    );
+
+    await billService.postBill(
+      bill._id,
+      fixture.tenant._id,
+      fixture.user._id,
+      { apAccountId, debitAccountId },
+      { auditContext: fixture.auditContext }
+    );
+
+    return billService.getBillById(bill._id, fixture.tenant._id);
+  }
+
+  const bill1 = await createPostedBill({
+    amount: '1000.00',
+    issueDate: '2026-04-01',
+    dueDate: '2026-04-10',
+  });
+  const bill2 = await createPostedBill({
+    amount: '400.00',
+    issueDate: '2026-04-15',
+    dueDate: '2026-04-25',
+  });
+
+  await billService.recordPayment(
+    bill1._id,
+    fixture.tenant._id,
+    fixture.user._id,
+    { cashAccountId, amount: '250.00', paymentDate: '2026-04-05' },
+    { auditContext: fixture.auditContext }
+  );
+  await billService.recordPayment(
+    bill2._id,
+    fixture.tenant._id,
+    fixture.user._id,
+    { cashAccountId, amount: '100.00', paymentDate: '2026-04-20' },
+    { auditContext: fixture.auditContext }
+  );
+
+  const statement = await supplierService.getSupplierStatement(supplier._id, fixture.tenant._id);
+
+  assert.equal(statement.summary.totalBilled, 1400);
+  assert.equal(statement.summary.totalPaid, 350);
+  assert.equal(statement.summary.outstandingBalance, 1050);
+  assert.deepEqual(
+    statement.transactions.map((transaction) => ({
+      type: transaction.type,
+      date: transaction.date.toISOString().slice(0, 10),
+      reference: transaction.reference,
+      debit: transaction.debit,
+      credit: transaction.credit,
+      runningBalance: transaction.runningBalance,
+      billId: transaction.billId,
+    })),
+    [
+      {
+        type: 'bill',
+        date: '2026-04-01',
+        reference: bill1.billNumber,
+        debit: 0,
+        credit: 1000,
+        runningBalance: 1000,
+        billId: bill1._id.toString(),
+      },
+      {
+        type: 'payment',
+        date: '2026-04-05',
+        reference: bill1.billNumber,
+        debit: 250,
+        credit: 0,
+        runningBalance: 750,
+        billId: bill1._id.toString(),
+      },
+      {
+        type: 'bill',
+        date: '2026-04-15',
+        reference: bill2.billNumber,
+        debit: 0,
+        credit: 400,
+        runningBalance: 1150,
+        billId: bill2._id.toString(),
+      },
+      {
+        type: 'payment',
+        date: '2026-04-20',
+        reference: bill2.billNumber,
+        debit: 100,
+        credit: 0,
+        runningBalance: 1050,
+        billId: bill2._id.toString(),
+      },
+    ]
+  );
+
+  const { response, body } = await fetchJson(
+    `${serverContext.baseUrl}/api/v1/suppliers/${supplier._id}/statement`,
+    {
+      headers: {
+        Authorization: `Bearer ${fixture.accessToken}`,
+      },
+    }
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(body.success, true);
+  assert.equal(body.data.summary.totalBilled, 1400);
+  assert.equal(body.data.summary.totalPaid, 350);
+  assert.equal(body.data.summary.outstandingBalance, 1050);
+  assert.equal(body.data.transactions.length, 4);
+});
+
+test('ap aging report groups outstanding balances by supplier and aging bucket', async () => {
+  const fixture = await createTenantFixture({ fiscalYear: 2026 });
+  tenantIds.add(fixture.tenant._id);
+
+  const accounts = await getAccountsByCode(fixture.tenant._id, ['1111', '2110', '5200']);
+  const cashAccountId = accounts.get('1111')._id.toString();
+  const apAccountId = accounts.get('2110')._id.toString();
+  const debitAccountId = accounts.get('5200')._id.toString();
+
+  async function createPostedBill(supplier, { amount, issueDate, dueDate }) {
+    const bill = await billService.createBill(
+      fixture.tenant._id,
+      fixture.user._id,
+      {
+        supplierId: supplier._id.toString(),
+        supplierName: supplier.name,
+        supplierEmail: supplier.email,
+        issueDate,
+        dueDate,
+        currency: 'EGP',
+        lineItems: [
+          {
+            description: 'Expense line',
+            quantity: '1',
+            unitPrice: amount,
+            lineTotal: amount,
+          },
+        ],
+        subtotal: amount,
+        total: amount,
+        notes: '',
+      },
+      { auditContext: fixture.auditContext }
+    );
+
+    await billService.postBill(
+      bill._id,
+      fixture.tenant._id,
+      fixture.user._id,
+      { apAccountId, debitAccountId },
+      { auditContext: fixture.auditContext }
+    );
+
+    return billService.getBillById(bill._id, fixture.tenant._id);
+  }
+
+  const supplierA = await supplierService.createSupplier(
+    fixture.tenant._id,
+    fixture.user._id,
+    { name: 'Alpha Supplies', email: 'alpha@example.com' },
+    { auditContext: fixture.auditContext }
+  );
+  const supplierB = await supplierService.createSupplier(
+    fixture.tenant._id,
+    fixture.user._id,
+    { name: 'Beta Manufacturing', email: 'beta@example.com' },
+    { auditContext: fixture.auditContext }
+  );
+
+  const billA1 = await createPostedBill(supplierA, {
+    amount: '1000.00',
+    issueDate: '2026-04-01',
+    dueDate: '2026-04-10',
+  });
+  const billA2 = await createPostedBill(supplierA, {
+    amount: '500.00',
+    issueDate: '2026-02-01',
+    dueDate: '2026-02-15',
+  });
+  const billB1 = await createPostedBill(supplierB, {
+    amount: '400.00',
+    issueDate: '2026-01-01',
+    dueDate: '2026-01-15',
+  });
+  const billB2 = await createPostedBill(supplierB, {
+    amount: '200.00',
+    issueDate: '2026-04-18',
+    dueDate: '2026-04-30',
+  });
+  const billExcluded = await createPostedBill(supplierB, {
+    amount: '250.00',
+    issueDate: '2026-03-01',
+    dueDate: '2026-03-15',
+  });
+
+  await billService.recordPayment(
+    billA2._id,
+    fixture.tenant._id,
+    fixture.user._id,
+    { cashAccountId, amount: '200.00', paymentDate: '2026-03-01' },
+    { auditContext: fixture.auditContext }
+  );
+  await billService.recordPayment(
+    billExcluded._id,
+    fixture.tenant._id,
+    fixture.user._id,
+    { cashAccountId, amount: '250.00', paymentDate: '2026-03-20' },
+    { auditContext: fixture.auditContext }
+  );
+
+  const draftBill = await billService.createBill(
+    fixture.tenant._id,
+    fixture.user._id,
+    {
+      supplierId: supplierA._id.toString(),
+      supplierName: supplierA.name,
+      supplierEmail: supplierA.email,
+      issueDate: '2026-04-05',
+      dueDate: '2026-04-12',
+      currency: 'EGP',
+      lineItems: [
+        {
+          description: 'Draft expense line',
+          quantity: '1',
+          unitPrice: '150.00',
+          lineTotal: '150.00',
+        },
+      ],
+      subtotal: '150.00',
+      total: '150.00',
+      notes: '',
+    },
+    { auditContext: fixture.auditContext }
+  );
+
+  const cancelledBill = await createPostedBill(supplierA, {
+    amount: '175.00',
+    issueDate: '2026-03-10',
+    dueDate: '2026-03-20',
+  });
+  await billService.cancelBill(
+    cancelledBill._id,
+    fixture.tenant._id,
+    fixture.user._id,
+    { auditContext: fixture.auditContext }
+  );
+
+  const { response, body } = await fetchJson(
+    `${serverContext.baseUrl}/api/v1/reports/ap-aging?asOfDate=2026-04-21`,
+    {
+      headers: {
+        Authorization: `Bearer ${fixture.accessToken}`,
+      },
+    }
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(body.success, true);
+  assert.equal(body.data.summary.totalOutstanding, '1900');
+  assert.equal(body.data.summary.suppliersWithOutstanding, 2);
+  assert.equal(body.data.summary.overdueBillsCount, 3);
+  assert.match(body.data.asOfDate, /^2026-04-21T23:59:59\.999Z$/);
+
+  const rowA = body.data.rows.find((row) => row.supplierId === supplierA._id.toString());
+  const rowB = body.data.rows.find((row) => row.supplierId === supplierB._id.toString());
+
+  assert.deepEqual(rowA, {
+    supplierId: supplierA._id.toString(),
+    supplierName: 'Alpha Supplies',
+    days0_30: '1000',
+    days31_60: '0',
+    days61_90: '300',
+    days90Plus: '0',
+    totalOutstanding: '1300',
+  });
+  assert.deepEqual(rowB, {
+    supplierId: supplierB._id.toString(),
+    supplierName: 'Beta Manufacturing',
+    days0_30: '200',
+    days31_60: '0',
+    days61_90: '0',
+    days90Plus: '400',
+    totalOutstanding: '600',
+  });
+
+  const serviceReport = await reportService.getAPAging(fixture.tenant._id, {
+    asOfDate: '2026-04-21',
+  });
+
+  assert.equal(serviceReport.summary.totalOutstanding, '1900');
+  assert.equal(serviceReport.rows.length, 2);
+
+  assert.ok(billA1);
+  assert.ok(billB1);
+  assert.ok(billB2);
+  assert.ok(draftBill);
 });

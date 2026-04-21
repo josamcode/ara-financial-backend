@@ -103,6 +103,11 @@ const arAgingQuerySchema = z.object({
   refresh: refreshSchema,
 }).strict();
 
+const apAgingQuerySchema = z.object({
+  asOfDate: isoDateSchema.optional(),
+  refresh: refreshSchema,
+}).strict();
+
 const trialBalanceExportQuerySchema = trialBalanceQuerySchema.extend({
   format: exportFormatSchema,
 }).strict();
@@ -125,6 +130,7 @@ module.exports = {
   balanceSheetQuerySchema,
   cashFlowQuerySchema,
   arAgingQuerySchema,
+  apAgingQuerySchema,
   trialBalanceExportQuerySchema,
   incomeStatementExportQuerySchema,
   balanceSheetExportQuerySchema,

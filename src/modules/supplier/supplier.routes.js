@@ -20,6 +20,7 @@ router.post(
   asyncHandler(controller.create)
 );
 router.get('/:id', authorize(PERMISSIONS.SUPPLIER_READ), asyncHandler(controller.getById));
+router.get('/:id/statement', authorize(PERMISSIONS.SUPPLIER_READ), asyncHandler(controller.getStatement));
 router.patch(
   '/:id',
   authorize(PERMISSIONS.SUPPLIER_UPDATE),
