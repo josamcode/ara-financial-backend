@@ -6,6 +6,7 @@ const reportService = require('../src/modules/report/report.service');
 const fiscalPeriodService = require('../src/modules/fiscal-period/fiscalPeriod.service');
 const customerService = require('../src/modules/customer/customer.service');
 const invoiceService = require('../src/modules/invoice/invoice.service');
+const { Invoice } = require('../src/modules/invoice/invoice.model');
 const {
   ensureDatabase,
   closeDatabase,
@@ -177,6 +178,166 @@ test('cash flow reports support comparison and export formats', async () => {
   });
   assert.equal(pdfResponse.status, 200);
   assert.match(pdfResponse.headers.get('content-type') || '', /application\/pdf/i);
+});
+
+test('invoice reads derive overdue status and stay in sync with due-date and payment changes', async () => {
+  const today = new Date();
+  const fiscalYear = today.getUTCFullYear();
+  const issueDate = today.toISOString().slice(0, 10);
+
+  const overdueDueDate = new Date(today);
+  overdueDueDate.setUTCDate(overdueDueDate.getUTCDate() - 1);
+
+  const futureDueDate = new Date(today);
+  futureDueDate.setUTCDate(futureDueDate.getUTCDate() + 7);
+
+  const fixture = await createTenantFixture({ fiscalYear });
+  tenantIds.add(fixture.tenant._id);
+
+  const accounts = await getAccountsByCode(fixture.tenant._id, ['1111', '1120', '4100']);
+  const cashAccountId = accounts.get('1111')._id.toString();
+  const arAccountId = accounts.get('1120')._id.toString();
+  const revenueAccountId = accounts.get('4100')._id.toString();
+
+  const customer = await customerService.createCustomer(
+    fixture.tenant._id,
+    fixture.user._id,
+    { name: 'Gamma Trading', email: 'gamma@example.com' },
+    { auditContext: fixture.auditContext }
+  );
+
+  const invoice = await invoiceService.createInvoice(
+    fixture.tenant._id,
+    fixture.user._id,
+    {
+      customerId: customer._id.toString(),
+      customerName: customer.name,
+      customerEmail: customer.email,
+      issueDate,
+      dueDate: overdueDueDate.toISOString().slice(0, 10),
+      currency: 'EGP',
+      lineItems: [
+        {
+          description: 'Consulting fee',
+          quantity: '1',
+          unitPrice: '100.00',
+          lineTotal: '100.00',
+        },
+      ],
+      subtotal: '100.00',
+      total: '100.00',
+      notes: '',
+    },
+    { auditContext: fixture.auditContext }
+  );
+
+  await invoiceService.markAsSent(
+    invoice._id,
+    fixture.tenant._id,
+    fixture.user._id,
+    { arAccountId, revenueAccountId },
+    { auditContext: fixture.auditContext }
+  );
+
+  await invoiceService.recordPayment(
+    invoice._id,
+    fixture.tenant._id,
+    fixture.user._id,
+    { cashAccountId, amount: '25.00', paymentDate: issueDate },
+    { auditContext: fixture.auditContext }
+  );
+
+  const authHeaders = {
+    Authorization: `Bearer ${fixture.accessToken}`,
+  };
+
+  const { response: overdueDetailResponse, body: overdueDetailBody } = await fetchJson(
+    `${serverContext.baseUrl}/api/v1/invoices/${invoice._id}`,
+    {
+      headers: authHeaders,
+    }
+  );
+
+  assert.equal(overdueDetailResponse.status, 200);
+  assert.equal(overdueDetailBody.data.invoice.status, 'overdue');
+  assert.equal(overdueDetailBody.data.invoice.paidAmount, 25);
+  assert.equal(overdueDetailBody.data.invoice.remainingAmount, 75);
+
+  const { response: overdueListResponse, body: overdueListBody } = await fetchJson(
+    `${serverContext.baseUrl}/api/v1/invoices?status=overdue`,
+    {
+      headers: authHeaders,
+    }
+  );
+
+  assert.equal(overdueListResponse.status, 200);
+  assert.equal(overdueListBody.meta.pagination.total, 1);
+  assert.equal(overdueListBody.data[0]._id, invoice._id.toString());
+  assert.equal(overdueListBody.data[0].status, 'overdue');
+
+  await Invoice.updateOne(
+    { _id: invoice._id, tenantId: fixture.tenant._id },
+    { $set: { dueDate: futureDueDate } }
+  );
+
+  const { body: currentDetailBody } = await fetchJson(
+    `${serverContext.baseUrl}/api/v1/invoices/${invoice._id}`,
+    {
+      headers: authHeaders,
+    }
+  );
+
+  assert.equal(currentDetailBody.data.invoice.status, 'partially_paid');
+
+  const { body: currentOverdueListBody } = await fetchJson(
+    `${serverContext.baseUrl}/api/v1/invoices?status=overdue`,
+    {
+      headers: authHeaders,
+    }
+  );
+
+  assert.equal(currentOverdueListBody.meta.pagination.total, 0);
+
+  const { body: partialListBody } = await fetchJson(
+    `${serverContext.baseUrl}/api/v1/invoices?status=partially_paid`,
+    {
+      headers: authHeaders,
+    }
+  );
+
+  assert.equal(partialListBody.meta.pagination.total, 1);
+  assert.equal(partialListBody.data[0]._id, invoice._id.toString());
+  assert.equal(partialListBody.data[0].status, 'partially_paid');
+
+  const { response: paidResponse, body: paidBody } = await fetchJson(
+    `${serverContext.baseUrl}/api/v1/invoices/${invoice._id}/pay`,
+    {
+      method: 'POST',
+      headers: {
+        ...authHeaders,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        cashAccountId,
+        amount: '75.00',
+        paymentDate: issueDate,
+      }),
+    }
+  );
+
+  assert.equal(paidResponse.status, 200);
+  assert.equal(paidBody.data.invoice.status, 'paid');
+  assert.equal(paidBody.data.invoice.remainingAmount, 0);
+
+  const { body: paidDetailBody } = await fetchJson(
+    `${serverContext.baseUrl}/api/v1/invoices/${invoice._id}`,
+    {
+      headers: authHeaders,
+    }
+  );
+
+  assert.equal(paidDetailBody.data.invoice.status, 'paid');
+  assert.equal(paidDetailBody.data.invoice.remainingAmount, 0);
 });
 
 test('ar aging report groups outstanding balances by customer and aging bucket', async () => {

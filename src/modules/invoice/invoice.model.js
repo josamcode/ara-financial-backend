@@ -3,6 +3,12 @@
 const mongoose = require('mongoose');
 const tenantPlugin = require('../../common/plugins/tenantPlugin');
 const softDeletePlugin = require('../../common/plugins/softDeletePlugin');
+const {
+  resolveInvoicePaidAmount,
+  resolveInvoiceRemainingAmount,
+  resolveInvoiceStatus,
+  resolveInvoiceTotalAmount,
+} = require('./invoice-status');
 
 const INVOICE_STATUSES = ['draft', 'sent', 'partially_paid', 'paid', 'overdue', 'cancelled'];
 
@@ -84,18 +90,10 @@ const invoiceSchema = new mongoose.Schema(
         const dec = (v) => (v ? v.toString() : '0');
         ret.subtotal = dec(ret.subtotal);
         ret.total = dec(ret.total);
-        const totalAmount = Number(ret.total);
-        const paidAmount = typeof ret.paidAmount === 'number'
-          ? ret.paidAmount
-          : ret.status === 'paid'
-            ? totalAmount
-            : 0;
-        ret.paidAmount = paidAmount;
-        ret.remainingAmount = typeof ret.remainingAmount === 'number'
-          ? ret.remainingAmount
-          : ret.status === 'paid'
-            ? 0
-            : Math.max(0, totalAmount - paidAmount);
+        const totalAmount = resolveInvoiceTotalAmount(ret);
+        ret.paidAmount = resolveInvoicePaidAmount(ret, totalAmount);
+        ret.remainingAmount = resolveInvoiceRemainingAmount(ret, totalAmount, ret.paidAmount);
+        ret.status = resolveInvoiceStatus(ret);
         ret.payments = Array.isArray(ret.payments) ? ret.payments : [];
         if (ret.lineItems) {
           ret.lineItems = ret.lineItems.map((item) => ({

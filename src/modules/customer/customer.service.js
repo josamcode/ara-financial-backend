@@ -2,6 +2,7 @@
 
 const { Customer } = require('./customer.model');
 const { Invoice } = require('../invoice/invoice.model');
+const { applyDerivedInvoiceStatus } = require('../invoice/invoice-status');
 const auditService = require('../audit/audit.service');
 const { NotFoundError } = require('../../common/errors');
 
@@ -38,12 +39,13 @@ class CustomerService {
     const invoices = await Invoice.find({ customerId, tenantId, deletedAt: null })
       .sort({ issueDate: -1 })
       .lean();
+    const derivedInvoices = invoices.map((invoice) => applyDerivedInvoiceStatus(invoice));
 
     let totalInvoiced = 0;
     let totalPaid = 0;
     let outstandingBalance = 0;
 
-    for (const inv of invoices) {
+    for (const inv of derivedInvoices) {
       const amount = this._resolveInvoiceAmount(inv);
       if (!INVOICED_STATUSES.includes(inv.status)) continue;
 
@@ -57,7 +59,7 @@ class CustomerService {
 
     return {
       customer,
-      invoices,
+      invoices: derivedInvoices,
       summary: {
         totalInvoiced,
         totalPaid,
@@ -73,13 +75,14 @@ class CustomerService {
     const invoices = await Invoice.find({ customerId, tenantId, deletedAt: null })
       .sort({ issueDate: 1, invoiceNumber: 1 })
       .lean();
+    const derivedInvoices = invoices.map((invoice) => applyDerivedInvoiceStatus(invoice));
 
     let totalInvoiced = 0;
     let totalPaid = 0;
     let outstandingBalance = 0;
     const entries = [];
 
-    for (const invoice of invoices) {
+    for (const invoice of derivedInvoices) {
       if (!INVOICED_STATUSES.includes(invoice.status)) continue;
 
       const amount = this._resolveInvoiceAmount(invoice);

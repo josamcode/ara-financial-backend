@@ -8,6 +8,10 @@ const journalService = require('../journal/journal.service');
 const auditService = require('../audit/audit.service');
 const { BadRequestError, NotFoundError } = require('../../common/errors');
 const logger = require('../../config/logger');
+const {
+  buildInvoiceStatusFilter,
+  COLLECTIBLE_INVOICE_STATUSES,
+} = require('./invoice-status');
 
 class InvoiceService {
   async createInvoice(tenantId, userId, data, options = {}) {
@@ -58,18 +62,31 @@ class InvoiceService {
 
   async listInvoices(tenantId, { page, limit, skip, status, search, startDate, endDate }) {
     const filter = { tenantId, deletedAt: null };
+    const andFilters = [];
 
-    if (status) filter.status = status;
+    if (status) {
+      const statusFilter = buildInvoiceStatusFilter(status);
+      if (statusFilter) {
+        andFilters.push(statusFilter);
+      }
+    }
     if (startDate || endDate) {
-      filter.issueDate = {};
-      if (startDate) filter.issueDate.$gte = new Date(startDate);
-      if (endDate) filter.issueDate.$lte = new Date(endDate);
+      const issueDateFilter = {};
+      if (startDate) issueDateFilter.$gte = new Date(startDate);
+      if (endDate) issueDateFilter.$lte = new Date(endDate);
+      andFilters.push({ issueDate: issueDateFilter });
     }
     if (search) {
-      filter.$or = [
-        { customerName: { $regex: search, $options: 'i' } },
-        { invoiceNumber: { $regex: search, $options: 'i' } },
-      ];
+      andFilters.push({
+        $or: [
+          { customerName: { $regex: search, $options: 'i' } },
+          { invoiceNumber: { $regex: search, $options: 'i' } },
+        ],
+      });
+    }
+
+    if (andFilters.length > 0) {
+      filter.$and = andFilters;
     }
 
     const [invoices, total] = await Promise.all([
@@ -228,8 +245,8 @@ class InvoiceService {
   async recordPayment(invoiceId, tenantId, userId, { cashAccountId, amount, paymentDate }, options = {}) {
     const invoice = await Invoice.findOne({ _id: invoiceId, tenantId });
     if (!invoice) throw new NotFoundError('Invoice not found');
-    if (!['sent', 'partially_paid'].includes(invoice.status)) {
-      throw new BadRequestError('Only sent or partially paid invoices can be paid');
+    if (!COLLECTIBLE_INVOICE_STATUSES.includes(invoice.status)) {
+      throw new BadRequestError('Only sent, overdue, or partially paid invoices can be paid');
     }
 
     const totalAmount = this._roundMonetaryAmount(Number(invoice.total?.toString() ?? 0));
