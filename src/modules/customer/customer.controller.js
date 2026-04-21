@@ -39,7 +39,12 @@ const controller = {
   },
 
   async getStatement(req, res) {
-    const result = await customerService.getCustomerStatement(req.params.id, req.tenantId);
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(MAX_LIMIT, Math.max(1, parseInt(req.query.limit, 10) || DEFAULT_LIMIT));
+    const result = await customerService.getCustomerStatement(req.params.id, req.tenantId, {
+      page,
+      limit,
+    });
     res.json({ success: true, data: result });
   },
 

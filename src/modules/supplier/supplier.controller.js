@@ -33,8 +33,18 @@ const controller = {
     res.json({ success: true, data: { supplier } });
   },
 
+  async getBills(req, res) {
+    const result = await supplierService.getSupplierBills(req.params.id, req.tenantId);
+    res.json({ success: true, data: result });
+  },
+
   async getStatement(req, res) {
-    const result = await supplierService.getSupplierStatement(req.params.id, req.tenantId);
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(MAX_LIMIT, Math.max(1, parseInt(req.query.limit, 10) || DEFAULT_LIMIT));
+    const result = await supplierService.getSupplierStatement(req.params.id, req.tenantId, {
+      page,
+      limit,
+    });
     res.json({ success: true, data: result });
   },
 

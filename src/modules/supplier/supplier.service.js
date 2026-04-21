@@ -12,6 +12,7 @@ const {
 } = require('../bill/bill-status');
 const auditService = require('../audit/audit.service');
 const { NotFoundError } = require('../../common/errors');
+const { buildPaginationMeta } = require('../../common/utils/response');
 
 const BILL_STATEMENT_STATUSES = ['posted', ...PAYABLE_BILL_STATUSES, 'paid'];
 
@@ -39,7 +40,54 @@ class SupplierService {
     return supplier;
   }
 
-  async getSupplierStatement(supplierId, tenantId) {
+  async getSupplierBills(supplierId, tenantId) {
+    const supplier = await Supplier.findOne({ _id: supplierId, tenantId, deletedAt: null }).lean();
+    if (!supplier) throw new NotFoundError('Supplier not found');
+
+    const bills = await Bill.find({ supplierId, tenantId, deletedAt: null })
+      .sort({ issueDate: -1, billNumber: -1 })
+      .lean();
+
+    let totalBilled = 0;
+    let totalPaid = 0;
+    let outstandingBalance = 0;
+    const detailedBills = [];
+
+    for (const bill of bills) {
+      const status = resolveBillStatus(bill);
+      const amount = resolveBillTotalAmount(bill);
+      const paidAmount = resolveBillPaidAmount(bill, amount);
+      const remainingAmount = resolveBillRemainingAmount(bill, amount, paidAmount);
+
+      detailedBills.push({
+        ...bill,
+        status,
+        total: amount,
+        paidAmount,
+        remainingAmount,
+      });
+
+      if (!BILL_STATEMENT_STATUSES.includes(status)) {
+        continue;
+      }
+
+      totalBilled = roundMonetaryAmount(totalBilled + amount);
+      totalPaid = roundMonetaryAmount(totalPaid + paidAmount);
+      outstandingBalance = roundMonetaryAmount(outstandingBalance + remainingAmount);
+    }
+
+    return {
+      supplier,
+      bills: detailedBills,
+      summary: {
+        totalBilled,
+        totalPaid,
+        outstandingBalance,
+      },
+    };
+  }
+
+  async getSupplierStatement(supplierId, tenantId, { page = 1, limit = 20 } = {}) {
     const supplier = await Supplier.findOne({ _id: supplierId, tenantId, deletedAt: null }).lean();
     if (!supplier) throw new NotFoundError('Supplier not found');
 
@@ -123,6 +171,9 @@ class SupplierService {
       };
     });
 
+    const pagination = buildPaginationMeta(page, limit, transactions.length);
+    const paginatedTransactions = transactions.slice((page - 1) * limit, page * limit);
+
     return {
       supplier,
       summary: {
@@ -130,7 +181,8 @@ class SupplierService {
         totalPaid,
         outstandingBalance,
       },
-      transactions,
+      transactions: paginatedTransactions,
+      pagination,
     };
   }
 

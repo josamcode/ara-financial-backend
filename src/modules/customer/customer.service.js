@@ -5,6 +5,7 @@ const { Invoice } = require('../invoice/invoice.model');
 const { applyDerivedInvoiceStatus } = require('../invoice/invoice-status');
 const auditService = require('../audit/audit.service');
 const { NotFoundError } = require('../../common/errors');
+const { buildPaginationMeta } = require('../../common/utils/response');
 
 const INVOICED_STATUSES = ['sent', 'partially_paid', 'paid', 'overdue'];
 
@@ -68,7 +69,7 @@ class CustomerService {
     };
   }
 
-  async getCustomerStatement(customerId, tenantId) {
+  async getCustomerStatement(customerId, tenantId, { page = 1, limit = 20 } = {}) {
     const customer = await Customer.findOne({ _id: customerId, tenantId, deletedAt: null }).lean();
     if (!customer) throw new NotFoundError('Customer not found');
 
@@ -150,6 +151,9 @@ class CustomerService {
       };
     });
 
+    const pagination = buildPaginationMeta(page, limit, transactions.length);
+    const paginatedTransactions = transactions.slice((page - 1) * limit, page * limit);
+
     return {
       customer,
       summary: {
@@ -157,7 +161,8 @@ class CustomerService {
         totalPaid,
         outstandingBalance,
       },
-      transactions,
+      transactions: paginatedTransactions,
+      pagination,
     };
   }
 

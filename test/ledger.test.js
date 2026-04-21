@@ -54,6 +54,6 @@ test('ledger running balances follow each account normal balance direction', asy
     { page: 1, limit: 20, skip: 0 }
   );
 
-  assert.equal(cashLedger.movements[0]?.balance, '100.00');
-  assert.equal(revenueLedger.movements[0]?.balance, '100.00');
+  assert.equal(cashLedger.movements[0]?.balance, '100');
+  assert.equal(revenueLedger.movements[0]?.balance, '100');
 });

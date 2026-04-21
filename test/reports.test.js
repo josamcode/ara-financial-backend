@@ -572,6 +572,11 @@ test('supplier statement combines bills and payments into a payable running bala
   );
 
   const statement = await supplierService.getSupplierStatement(supplier._id, fixture.tenant._id);
+  const paginatedStatement = await supplierService.getSupplierStatement(
+    supplier._id,
+    fixture.tenant._id,
+    { page: 2, limit: 2 }
+  );
 
   assert.equal(statement.summary.totalBilled, 1400);
   assert.equal(statement.summary.totalPaid, 350);
@@ -625,9 +630,15 @@ test('supplier statement combines bills and payments into a payable running bala
       },
     ]
   );
+  assert.equal(paginatedStatement.pagination.page, 2);
+  assert.equal(paginatedStatement.pagination.limit, 2);
+  assert.equal(paginatedStatement.pagination.total, 4);
+  assert.equal(paginatedStatement.transactions.length, 2);
+  assert.equal(paginatedStatement.transactions[0].reference, bill2.billNumber);
+  assert.equal(paginatedStatement.transactions[1].reference, bill2.billNumber);
 
   const { response, body } = await fetchJson(
-    `${serverContext.baseUrl}/api/v1/suppliers/${supplier._id}/statement`,
+    `${serverContext.baseUrl}/api/v1/suppliers/${supplier._id}/statement?page=2&limit=2`,
     {
       headers: {
         Authorization: `Bearer ${fixture.accessToken}`,
@@ -640,7 +651,10 @@ test('supplier statement combines bills and payments into a payable running bala
   assert.equal(body.data.summary.totalBilled, 1400);
   assert.equal(body.data.summary.totalPaid, 350);
   assert.equal(body.data.summary.outstandingBalance, 1050);
-  assert.equal(body.data.transactions.length, 4);
+  assert.equal(body.data.pagination.page, 2);
+  assert.equal(body.data.pagination.limit, 2);
+  assert.equal(body.data.pagination.total, 4);
+  assert.equal(body.data.transactions.length, 2);
 });
 
 test('ap aging report groups outstanding balances by supplier and aging bucket', async () => {
