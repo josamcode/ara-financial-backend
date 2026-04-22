@@ -50,9 +50,14 @@ const recordPaymentSchema = z.object({
   paymentDate: z.string().refine((v) => !isNaN(Date.parse(v)), 'Valid date required').optional(),
 });
 
+const bulkInvoiceIdsSchema = z.object({
+  ids: z.array(z.string().min(1)).min(1, 'At least one invoice is required'),
+});
+
 module.exports = {
   createInvoiceSchema,
   updateInvoiceSchema,
   markSentSchema,
   recordPaymentSchema,
+  bulkInvoiceIdsSchema,
 };

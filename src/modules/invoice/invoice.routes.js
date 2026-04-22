@@ -11,6 +11,7 @@ const {
   updateInvoiceSchema,
   markSentSchema,
   recordPaymentSchema,
+  bulkInvoiceIdsSchema,
 } = require('./invoice.validation');
 
 const router = Router();
@@ -28,6 +29,20 @@ router.get(
   '/',
   authorize(PERMISSIONS.INVOICE_READ),
   asyncHandler(controller.list)
+);
+
+router.post(
+  '/bulk/cancel',
+  authorize(PERMISSIONS.INVOICE_UPDATE),
+  validate({ body: bulkInvoiceIdsSchema }),
+  asyncHandler(controller.bulkCancel)
+);
+
+router.post(
+  '/bulk/delete',
+  authorize(PERMISSIONS.INVOICE_DELETE),
+  validate({ body: bulkInvoiceIdsSchema }),
+  asyncHandler(controller.bulkDelete)
 );
 
 router.get(

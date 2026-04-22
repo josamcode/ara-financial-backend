@@ -37,8 +37,13 @@ const recordBillPaymentSchema = z.object({
   paymentDate: z.string().refine((value) => !isNaN(Date.parse(value)), 'Valid date required').optional(),
 });
 
+const bulkBillIdsSchema = z.object({
+  ids: z.array(z.string().min(1)).min(1, 'At least one bill is required'),
+});
+
 module.exports = {
   createBillSchema,
   postBillSchema,
   recordBillPaymentSchema,
+  bulkBillIdsSchema,
 };

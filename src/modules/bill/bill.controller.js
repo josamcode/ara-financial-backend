@@ -79,6 +79,17 @@ class BillController {
     return success(res, { bill });
   }
 
+  async bulkCancel(req, res) {
+    const auditContext = getAuditContext(req);
+    const result = await billService.bulkCancelBills(
+      req.body.ids,
+      req.user.tenantId,
+      req.user.userId,
+      { auditContext }
+    );
+    return success(res, result);
+  }
+
   async cancel(req, res) {
     const auditContext = getAuditContext(req);
     const bill = await billService.cancelBill(

@@ -70,12 +70,28 @@ class InvoiceController {
     return success(res, { invoice });
   }
 
+  async bulkCancel(req, res) {
+    const auditContext = getAuditContext(req);
+    const result = await invoiceService.bulkCancelInvoices(
+      req.body.ids, req.user.tenantId, req.user.userId, { auditContext }
+    );
+    return success(res, result);
+  }
+
   async cancel(req, res) {
     const auditContext = getAuditContext(req);
     const invoice = await invoiceService.cancelInvoice(
       req.params.id, req.user.tenantId, req.user.userId, { auditContext }
     );
     return success(res, { invoice });
+  }
+
+  async bulkDelete(req, res) {
+    const auditContext = getAuditContext(req);
+    const result = await invoiceService.bulkDeleteInvoices(
+      req.body.ids, req.user.tenantId, req.user.userId, { auditContext }
+    );
+    return success(res, result);
   }
 
   async delete(req, res) {

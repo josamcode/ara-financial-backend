@@ -248,6 +248,25 @@ class BillService {
     return bill;
   }
 
+  async bulkCancelBills(billIds, tenantId, userId, options = {}) {
+    const uniqueBillIds = this._normalizeBulkIds(billIds);
+    const bills = await Bill.find({ _id: { $in: uniqueBillIds }, tenantId });
+
+    if (bills.length !== uniqueBillIds.length) {
+      throw new NotFoundError('One or more bills not found');
+    }
+
+    if (bills.some((bill) => ['paid', 'cancelled'].includes(bill.status))) {
+      throw new BadRequestError('One or more selected bills cannot be cancelled');
+    }
+
+    for (const billId of uniqueBillIds) {
+      await this.cancelBill(billId, tenantId, userId, options);
+    }
+
+    return { count: uniqueBillIds.length };
+  }
+
   async cancelBill(billId, tenantId, userId, options = {}) {
     const bill = await Bill.findOne({ _id: billId, tenantId });
     if (!bill) throw new NotFoundError('Bill not found');
@@ -369,6 +388,14 @@ class BillService {
     } catch (_error) {
       return null;
     }
+  }
+
+  _normalizeBulkIds(ids) {
+    const uniqueIds = [...new Set((ids || []).map((id) => String(id)).filter(Boolean))];
+    if (uniqueIds.length === 0) {
+      throw new BadRequestError('At least one bill is required');
+    }
+    return uniqueIds;
   }
 
   async _getNextBillNumber(tenantId) {

@@ -10,6 +10,7 @@ const {
   createBillSchema,
   postBillSchema,
   recordBillPaymentSchema,
+  bulkBillIdsSchema,
 } = require('./bill.validation');
 
 const router = Router();
@@ -27,6 +28,13 @@ router.get(
   '/',
   authorize(PERMISSIONS.BILL_READ),
   asyncHandler(controller.list)
+);
+
+router.post(
+  '/bulk/cancel',
+  authorize(PERMISSIONS.BILL_CREATE),
+  validate({ body: bulkBillIdsSchema }),
+  asyncHandler(controller.bulkCancel)
 );
 
 router.get(

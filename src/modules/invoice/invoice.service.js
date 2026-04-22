@@ -301,6 +301,25 @@ class InvoiceService {
     return invoice;
   }
 
+  async bulkCancelInvoices(invoiceIds, tenantId, userId, options = {}) {
+    const uniqueInvoiceIds = this._normalizeBulkIds(invoiceIds);
+    const invoices = await Invoice.find({ _id: { $in: uniqueInvoiceIds }, tenantId });
+
+    if (invoices.length !== uniqueInvoiceIds.length) {
+      throw new NotFoundError('One or more invoices not found');
+    }
+
+    if (invoices.some((invoice) => ['paid', 'cancelled'].includes(invoice.status))) {
+      throw new BadRequestError('One or more selected invoices cannot be cancelled');
+    }
+
+    for (const invoiceId of uniqueInvoiceIds) {
+      await this.cancelInvoice(invoiceId, tenantId, userId, options);
+    }
+
+    return { count: uniqueInvoiceIds.length };
+  }
+
   async cancelInvoice(invoiceId, tenantId, userId, options = {}) {
     const invoice = await Invoice.findOne({ _id: invoiceId, tenantId });
     if (!invoice) throw new NotFoundError('Invoice not found');
@@ -323,6 +342,25 @@ class InvoiceService {
     });
 
     return invoice;
+  }
+
+  async bulkDeleteInvoices(invoiceIds, tenantId, userId, options = {}) {
+    const uniqueInvoiceIds = this._normalizeBulkIds(invoiceIds);
+    const invoices = await Invoice.find({ _id: { $in: uniqueInvoiceIds }, tenantId });
+
+    if (invoices.length !== uniqueInvoiceIds.length) {
+      throw new NotFoundError('One or more invoices not found');
+    }
+
+    if (invoices.some((invoice) => invoice.status !== 'draft')) {
+      throw new BadRequestError('Only draft invoices can be deleted');
+    }
+
+    for (const invoiceId of uniqueInvoiceIds) {
+      await this.deleteInvoice(invoiceId, tenantId, userId, options);
+    }
+
+    return { count: uniqueInvoiceIds.length };
   }
 
   async deleteInvoice(invoiceId, tenantId, userId, options = {}) {
@@ -457,6 +495,14 @@ class InvoiceService {
     } catch (_error) {
       return null;
     }
+  }
+
+  _normalizeBulkIds(ids) {
+    const uniqueIds = [...new Set((ids || []).map((id) => String(id)).filter(Boolean))];
+    if (uniqueIds.length === 0) {
+      throw new BadRequestError('At least one invoice is required');
+    }
+    return uniqueIds;
   }
 
   async _getNextInvoiceNumber(tenantId) {
