@@ -41,7 +41,7 @@ function uploadTenantLogo(req, res, next) {
       return;
     }
 
-    next(new BadRequestError(error.message || 'Unable to upload logo'));
+    next(new BadRequestError('Unable to upload logo'));
   });
 }
 

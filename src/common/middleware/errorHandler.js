@@ -1,7 +1,24 @@
 'use strict';
 
 const logger = require('../../config/logger');
-const { AppError } = require('../errors');
+
+function buildValidationMessage(errors) {
+  if (!Array.isArray(errors) || errors.length === 0) {
+    return 'Validation failed';
+  }
+
+  return errors
+    .map(({ field, message }) => (field ? `${field}: ${message}` : message))
+    .join('; ');
+}
+
+function toFieldLabel(field) {
+  if (!field) return 'Field';
+
+  return String(field)
+    .replace(/[_.-]+/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
 
 /**
  * Global error handling middleware.
@@ -12,44 +29,47 @@ function errorHandler(err, req, res, _next) {
   // Default values
   let statusCode = err.statusCode || 500;
   let code = err.code || 'INTERNAL_ERROR';
-  let message = err.message || 'An unexpected error occurred';
+  let message = err.message || 'Something went wrong';
   let errors = err.errors || undefined;
 
   // Mongoose validation error
   if (err.name === 'ValidationError' && err.errors && !err.isOperational) {
     statusCode = 422;
     code = 'VALIDATION_ERROR';
-    message = 'Validation failed';
     errors = Object.values(err.errors).map((e) => ({
       field: e.path,
       message: e.message,
     }));
+    message = buildValidationMessage(errors);
   }
 
   // Mongoose duplicate key error
   if (err.code === 11000) {
-    statusCode = 409;
-    code = 'DUPLICATE_KEY';
+    statusCode = 400;
+    code = 'BAD_REQUEST';
     const field = Object.keys(err.keyPattern || {})[0] || 'unknown';
-    message = `Duplicate value for field: ${field}`;
+    const fieldLabel = toFieldLabel(field);
+    message = `${fieldLabel} already exists`;
+    errors = [{ field, message }];
   }
 
   // Mongoose cast error (invalid ObjectId)
   if (err.name === 'CastError') {
     statusCode = 400;
-    code = 'INVALID_ID';
-    message = `Invalid value for ${err.path}: ${err.value}`;
+    code = 'BAD_REQUEST';
+    message = `Invalid ${toFieldLabel(err.path)}`;
+    errors = [{ field: err.path, message }];
   }
 
   // JWT errors
   if (err.name === 'JsonWebTokenError') {
     statusCode = 401;
-    code = 'INVALID_TOKEN';
+    code = 'UNAUTHORIZED';
     message = 'Invalid token';
   }
   if (err.name === 'TokenExpiredError') {
     statusCode = 401;
-    code = 'TOKEN_EXPIRED';
+    code = 'UNAUTHORIZED';
     message = 'Token expired';
   }
 
@@ -57,25 +77,26 @@ function errorHandler(err, req, res, _next) {
   if (statusCode >= 500) {
     logger.error({ err, requestId: req.id }, 'Unhandled error');
   } else {
-    logger.warn({ statusCode, code, message, requestId: req.id }, 'Client error');
+    logger.warn({ err, statusCode, code, message, requestId: req.id }, 'Client error');
   }
 
-  // Do not leak internals in production
-  const isProduction = process.env.NODE_ENV === 'production';
+  if (statusCode >= 500) {
+    statusCode = 500;
+    code = 'INTERNAL_ERROR';
+    message = 'Something went wrong';
+    errors = undefined;
+  }
+
   const response = {
     success: false,
     error: {
       code,
-      message: isProduction && statusCode >= 500 ? 'An unexpected error occurred' : message,
+      message,
     },
   };
 
   if (errors) {
     response.error.errors = errors;
-  }
-
-  if (!isProduction && err.stack) {
-    response.error.stack = err.stack;
   }
 
   if (err.retryAfter) {

@@ -2,6 +2,7 @@
 
 const supplierService = require('./supplier.service');
 const { getAuditContext } = require('../../common/utils/audit');
+const { success, created } = require('../../common/utils/response');
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
@@ -19,23 +20,20 @@ const controller = {
       search,
     });
 
-    res.json({
-      success: true,
-      data: {
-        suppliers,
-        pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
-      },
+    return success(res, {
+      suppliers,
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
     });
   },
 
   async getById(req, res) {
     const supplier = await supplierService.getSupplierById(req.params.id, req.tenantId);
-    res.json({ success: true, data: { supplier } });
+    return success(res, { supplier });
   },
 
   async getBills(req, res) {
     const result = await supplierService.getSupplierBills(req.params.id, req.tenantId);
-    res.json({ success: true, data: result });
+    return success(res, result);
   },
 
   async getStatement(req, res) {
@@ -45,7 +43,7 @@ const controller = {
       page,
       limit,
     });
-    res.json({ success: true, data: result });
+    return success(res, result);
   },
 
   async create(req, res) {
@@ -55,7 +53,7 @@ const controller = {
       req.body,
       { auditContext: getAuditContext(req) }
     );
-    res.status(201).json({ success: true, data: { supplier } });
+    return created(res, { supplier });
   },
 
   async update(req, res) {
@@ -66,7 +64,7 @@ const controller = {
       req.body,
       { auditContext: getAuditContext(req) }
     );
-    res.json({ success: true, data: { supplier } });
+    return success(res, { supplier });
   },
 
   async delete(req, res) {
@@ -76,7 +74,7 @@ const controller = {
       req.user.userId,
       { auditContext: getAuditContext(req) }
     );
-    res.json({ success: true, data: null });
+    return success(res, null);
   },
 };
 

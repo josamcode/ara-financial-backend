@@ -3,6 +3,16 @@
 const { ZodError } = require('zod');
 const { ValidationError } = require('../errors');
 
+function buildValidationMessage(errors) {
+  if (!Array.isArray(errors) || errors.length === 0) {
+    return 'Validation failed';
+  }
+
+  return errors
+    .map(({ field, message }) => (field ? `${field}: ${message}` : message))
+    .join('; ');
+}
+
 /**
  * Creates an Express middleware that validates request data against a Zod schema.
  * @param {Object} schemas - { body?, query?, params? } each a Zod schema
@@ -26,7 +36,7 @@ function validate(schemas) {
           field: e.path.join('.'),
           message: e.message,
         }));
-        return next(new ValidationError('Validation failed', errors));
+        return next(new ValidationError(buildValidationMessage(errors), errors));
       }
       next(err);
     }

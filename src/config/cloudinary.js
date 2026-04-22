@@ -13,7 +13,7 @@ function ensureCloudinaryConfigured() {
   const apiSecret = process.env.CLOUDINARY_API_SECRET;
 
   if (!cloudName || !apiKey || !apiSecret) {
-    throw new Error('Cloudinary is not configured');
+    throw new AppError('Tenant logo storage is unavailable', 500, 'INTERNAL_ERROR');
   }
 
   cloudinary.config({
@@ -26,37 +26,9 @@ function ensureCloudinaryConfigured() {
 }
 
 function mapCloudinaryError(error) {
-  const providerMessage =
-    error?.error?.message ||
-    error?.message ||
-    'Cloudinary request failed';
-
-  const normalizedMessage = String(providerMessage).toLowerCase();
-
-  if (
-    normalizedMessage.includes('disabled customer') ||
-    normalizedMessage.includes('cloud_name is disabled')
-  ) {
-    return new AppError(
-      'Cloudinary account is disabled. Replace CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET with an active account.',
-      502,
-      'CLOUDINARY_DISABLED'
-    );
-  }
-
-  if (error?.http_code === 401 || normalizedMessage.includes('invalid')) {
-    return new AppError(
-      'Cloudinary credentials are invalid. Update CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET.',
-      502,
-      'CLOUDINARY_AUTH_FAILED'
-    );
-  }
-
-  return new AppError(
-    `Cloudinary request failed: ${providerMessage}`,
-    502,
-    'CLOUDINARY_ERROR'
-  );
+  const mappedError = new AppError('Unable to process tenant logo', 502, 'INTERNAL_ERROR');
+  mappedError.cause = error;
+  return mappedError;
 }
 
 async function uploadTenantLogo({ tenantId, file }) {
