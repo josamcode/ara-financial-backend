@@ -9,6 +9,7 @@ const auditService = require('../audit/audit.service');
 const { BadRequestError, NotFoundError } = require('../../common/errors');
 const logger = require('../../config/logger');
 const {
+  buildBillStatusFilter,
   PAYABLE_BILL_STATUSES,
   resolveBillPaidAmount,
   resolveBillRemainingAmount,
@@ -63,9 +64,16 @@ class BillService {
     return bill;
   }
 
-  async listBills(tenantId, { skip, limit, search, startDate, endDate } = {}) {
+  async listBills(tenantId, { skip, limit, status, search, startDate, endDate } = {}) {
     const filter = { tenantId, deletedAt: null };
     const andFilters = [];
+
+    if (status) {
+      const statusFilter = buildBillStatusFilter(status);
+      if (statusFilter) {
+        andFilters.push(statusFilter);
+      }
+    }
 
     if (startDate || endDate) {
       const issueDateFilter = {};

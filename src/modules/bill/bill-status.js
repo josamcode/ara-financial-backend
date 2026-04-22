@@ -67,6 +67,11 @@ function toUtcDayValue(dateValue) {
   return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
 }
 
+function getUtcDayStart(dateValue) {
+  const dayValue = toUtcDayValue(dateValue);
+  return dayValue === null ? null : new Date(dayValue);
+}
+
 function isBillOverdue(bill, { asOfDate = new Date() } = {}) {
   const remainingAmount = resolveBillRemainingAmount(bill);
   if (remainingAmount <= 0) {
@@ -100,7 +105,55 @@ function resolveBillStatus(bill, options = {}) {
   return paidAmount > 0 ? 'partially_paid' : 'posted';
 }
 
+function buildBillStatusFilter(status, { asOfDate = new Date() } = {}) {
+  if (!status) {
+    return null;
+  }
+
+  const asOfDayStart = getUtcDayStart(asOfDate);
+
+  switch (status) {
+    case 'draft':
+    case 'cancelled':
+      return { status };
+    case 'paid':
+      return {
+        $or: [
+          { status: 'paid' },
+          {
+            status: { $in: PAYABLE_BILL_STATUSES },
+            remainingAmount: { $lte: 0 },
+          },
+        ],
+      };
+    case 'overdue':
+      return {
+        status: { $in: PAYABLE_BILL_STATUSES },
+        remainingAmount: { $gt: 0 },
+        dueDate: { $lt: asOfDayStart },
+      };
+    case 'partially_paid':
+      return {
+        status: { $in: PAYABLE_BILL_STATUSES },
+        remainingAmount: { $gt: 0 },
+        paidAmount: { $gt: 0 },
+        dueDate: { $gte: asOfDayStart },
+      };
+    case 'posted':
+      return {
+        status: { $in: PAYABLE_BILL_STATUSES },
+        remainingAmount: { $gt: 0 },
+        paidAmount: { $lte: 0 },
+        dueDate: { $gte: asOfDayStart },
+      };
+    default:
+      return { status };
+  }
+}
+
 module.exports = {
+  buildBillStatusFilter,
+  getUtcDayStart,
   PAYABLE_BILL_STATUSES,
   resolveBillPaidAmount,
   resolveBillRemainingAmount,

@@ -19,6 +19,14 @@ const DASHBOARD_INSIGHT_ROUTES = Object.freeze({
   incomeStatement: '/reports/income-statement',
 });
 
+function buildInvoicesRoute(status) {
+  return status ? `/invoices?status=${status}` : DASHBOARD_INSIGHT_ROUTES.invoices;
+}
+
+function buildBillsRoute(status) {
+  return status ? `/bills?status=${status}` : DASHBOARD_INSIGHT_ROUTES.bills;
+}
+
 function getOutstandingFilters(tenantId) {
   const tid = new mongoose.Types.ObjectId(tenantId);
   const today = new Date();
@@ -46,6 +54,18 @@ function getOutstandingFilters(tenantId) {
 
 function buildEntityRoute(basePath, entityId) {
   return entityId ? `${basePath}/${entityId}` : basePath;
+}
+
+function buildCustomerStatementRoute(entityId) {
+  return entityId
+    ? `${DASHBOARD_INSIGHT_ROUTES.customers}/${entityId}/statement`
+    : DASHBOARD_INSIGHT_ROUTES.customers;
+}
+
+function buildSupplierStatementRoute(entityId) {
+  return entityId
+    ? `${DASHBOARD_INSIGHT_ROUTES.suppliers}/${entityId}/statement`
+    : DASHBOARD_INSIGHT_ROUTES.suppliers;
 }
 
 /**
@@ -212,7 +232,7 @@ class DashboardService {
       insights.push({
         id: 'overdue_invoices',
         tone: 'danger',
-        href: DASHBOARD_INSIGHT_ROUTES.invoices,
+        href: buildInvoicesRoute('overdue'),
         count: arap.overdueInvoices,
       });
     } else {
@@ -227,7 +247,7 @@ class DashboardService {
       insights.push({
         id: 'overdue_bills',
         tone: 'warning',
-        href: DASHBOARD_INSIGHT_ROUTES.bills,
+        href: buildBillsRoute('overdue'),
         count: arap.overdueBills,
       });
     } else {
@@ -242,10 +262,7 @@ class DashboardService {
       insights.push({
         id: 'top_customer_outstanding',
         tone: 'info',
-        href: buildEntityRoute(
-          DASHBOARD_INSIGHT_ROUTES.customers,
-          topCustomer[0].customerId?.toString()
-        ),
+        href: buildCustomerStatementRoute(topCustomer[0].customerId?.toString()),
         customerName: topCustomer[0].customerName,
         amount: topCustomer[0].outstandingAmount,
       });
@@ -255,10 +272,7 @@ class DashboardService {
       insights.push({
         id: 'top_supplier_payable',
         tone: 'warning',
-        href: buildEntityRoute(
-          DASHBOARD_INSIGHT_ROUTES.suppliers,
-          topSupplier[0].supplierId?.toString()
-        ),
+        href: buildSupplierStatementRoute(topSupplier[0].supplierId?.toString()),
         supplierName: topSupplier[0].supplierName,
         amount: topSupplier[0].outstandingAmount,
       });
