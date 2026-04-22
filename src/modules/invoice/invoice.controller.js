@@ -15,10 +15,27 @@ class InvoiceController {
 
   async list(req, res) {
     const pagination = parsePagination(req.query);
-    const { status, search, startDate, endDate } = req.query;
+    const {
+      status,
+      search,
+      dateFrom,
+      dateTo,
+      startDate,
+      endDate,
+      minAmount,
+      maxAmount,
+    } = req.query;
     const { invoices, total } = await invoiceService.listInvoices(
       req.user.tenantId,
-      { ...pagination, status, search, startDate, endDate }
+      {
+        ...pagination,
+        status,
+        search,
+        dateFrom: dateFrom || startDate,
+        dateTo: dateTo || endDate,
+        minAmount,
+        maxAmount,
+      }
     );
     const meta = buildPaginationMeta(pagination.page, pagination.limit, total);
     return paginated(res, invoices, meta);

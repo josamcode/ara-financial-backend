@@ -64,36 +64,15 @@ class BillService {
     return bill;
   }
 
-  async listBills(tenantId, { skip, limit, status, search, startDate, endDate } = {}) {
-    const filter = { tenantId, deletedAt: null };
-    const andFilters = [];
-
-    if (status) {
-      const statusFilter = buildBillStatusFilter(status);
-      if (statusFilter) {
-        andFilters.push(statusFilter);
-      }
-    }
-
-    if (startDate || endDate) {
-      const issueDateFilter = {};
-      if (startDate) issueDateFilter.$gte = new Date(startDate);
-      if (endDate) issueDateFilter.$lte = new Date(endDate);
-      andFilters.push({ issueDate: issueDateFilter });
-    }
-
-    if (search) {
-      andFilters.push({
-        $or: [
-          { supplierName: { $regex: search, $options: 'i' } },
-          { billNumber: { $regex: search, $options: 'i' } },
-        ],
-      });
-    }
-
-    if (andFilters.length > 0) {
-      filter.$and = andFilters;
-    }
+  async listBills(tenantId, { skip, limit, status, search, dateFrom, dateTo, minAmount, maxAmount } = {}) {
+    const filter = this._buildListFilter(tenantId, {
+      status,
+      search,
+      dateFrom,
+      dateTo,
+      minAmount,
+      maxAmount,
+    });
 
     const [bills, total] = await Promise.all([
       Bill.find(filter)
@@ -301,6 +280,95 @@ class BillService {
       unitPrice: mongoose.Types.Decimal128.fromString(item.unitPrice),
       lineTotal: mongoose.Types.Decimal128.fromString(item.lineTotal),
     }));
+  }
+
+  _buildListFilter(tenantId, { status, search, dateFrom, dateTo, minAmount, maxAmount }) {
+    const filter = { tenantId, deletedAt: null };
+    const andFilters = [
+      this._buildStatusListFilter(status),
+      this._buildDateRangeFilter(dateFrom, dateTo),
+      this._buildAmountRangeFilter(minAmount, maxAmount),
+      this._buildSearchFilter(search),
+    ].filter(Boolean);
+
+    if (andFilters.length > 0) {
+      filter.$and = andFilters;
+    }
+
+    return filter;
+  }
+
+  _buildStatusListFilter(status) {
+    if (!status) return null;
+    return buildBillStatusFilter(status);
+  }
+
+  _buildDateRangeFilter(dateFrom, dateTo) {
+    const issueDateFilter = {};
+    const fromDate = this._parseDateFilter(dateFrom);
+    const toDate = this._parseDateFilter(dateTo, true);
+
+    if (fromDate) issueDateFilter.$gte = fromDate;
+    if (toDate) issueDateFilter.$lte = toDate;
+
+    return Object.keys(issueDateFilter).length > 0 ? { issueDate: issueDateFilter } : null;
+  }
+
+  _buildAmountRangeFilter(minAmount, maxAmount) {
+    const totalFilter = {};
+    const min = this._parseDecimalFilter(minAmount);
+    const max = this._parseDecimalFilter(maxAmount);
+
+    if (min) totalFilter.$gte = min;
+    if (max) totalFilter.$lte = max;
+
+    return Object.keys(totalFilter).length > 0 ? { total: totalFilter } : null;
+  }
+
+  _buildSearchFilter(search) {
+    const regex = this._buildSearchRegex(search);
+    if (!regex) return null;
+
+    return {
+      $or: [
+        { supplierName: regex },
+        { billNumber: regex },
+      ],
+    };
+  }
+
+  _buildSearchRegex(search) {
+    const value = typeof search === 'string' ? search.trim() : '';
+    if (!value) return null;
+
+    try {
+      return new RegExp(value, 'i');
+    } catch (_error) {
+      return new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    }
+  }
+
+  _parseDateFilter(value, endOfDay = false) {
+    if (!value) return null;
+
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return null;
+
+    if (endOfDay) {
+      parsed.setUTCHours(23, 59, 59, 999);
+    }
+
+    return parsed;
+  }
+
+  _parseDecimalFilter(value) {
+    if (value === undefined || value === null || value === '') return null;
+
+    try {
+      return mongoose.Types.Decimal128.fromString(String(value));
+    } catch (_error) {
+      return null;
+    }
   }
 
   async _getNextBillNumber(tenantId) {
