@@ -82,6 +82,22 @@ class InvoiceService {
     return { invoices, total };
   }
 
+  async exportInvoices(tenantId, { status, search, dateFrom, dateTo, minAmount, maxAmount } = {}) {
+    const filter = this._buildListFilter(tenantId, {
+      status,
+      search,
+      dateFrom,
+      dateTo,
+      minAmount,
+      maxAmount,
+    });
+
+    return Invoice.find(filter)
+      .select('invoiceNumber customerName status total paidAmount remainingAmount issueDate dueDate')
+      .sort({ issueDate: -1, invoiceNumber: -1 })
+      .lean();
+  }
+
   async getInvoiceById(invoiceId, tenantId) {
     const invoice = await Invoice.findOne({ _id: invoiceId, tenantId })
       .populate({ path: 'createdBy', select: 'name email', match: { tenantId } })

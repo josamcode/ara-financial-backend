@@ -2,7 +2,59 @@
 
 const invoiceService = require('./invoice.service');
 const { getAuditContext } = require('../../common/utils/audit');
+const { sendCSV } = require('../../common/utils/csv');
 const { success, created, paginated, parsePagination, buildPaginationMeta } = require('../../common/utils/response');
+
+const INVOICE_EXPORT_FIELDS = [
+  'invoiceNumber',
+  'customerName',
+  'status',
+  'total',
+  'paidAmount',
+  'remainingAmount',
+  'issueDate',
+  'dueDate',
+];
+
+function buildListParams(query, includePagination = false) {
+  const params = {
+    status: query.status,
+    search: query.search,
+    dateFrom: query.dateFrom || query.startDate,
+    dateTo: query.dateTo || query.endDate,
+    minAmount: query.minAmount,
+    maxAmount: query.maxAmount,
+  };
+
+  return includePagination
+    ? { ...parsePagination(query), ...params }
+    : params;
+}
+
+function formatDateValue(value) {
+  if (!value) return '';
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '' : date.toISOString().slice(0, 10);
+}
+
+function formatNumericValue(value) {
+  if (value === null || value === undefined) return '';
+  return typeof value?.toString === 'function' ? value.toString() : String(value);
+}
+
+function toExportRows(invoices) {
+  return invoices.map((invoice) => ({
+    invoiceNumber: invoice.invoiceNumber || '',
+    customerName: invoice.customerName || '',
+    status: invoice.status || '',
+    total: formatNumericValue(invoice.total),
+    paidAmount: formatNumericValue(invoice.paidAmount),
+    remainingAmount: formatNumericValue(invoice.remainingAmount),
+    issueDate: formatDateValue(invoice.issueDate),
+    dueDate: formatDateValue(invoice.dueDate),
+  }));
+}
 
 class InvoiceController {
   async create(req, res) {
@@ -14,31 +66,22 @@ class InvoiceController {
   }
 
   async list(req, res) {
-    const pagination = parsePagination(req.query);
-    const {
-      status,
-      search,
-      dateFrom,
-      dateTo,
-      startDate,
-      endDate,
-      minAmount,
-      maxAmount,
-    } = req.query;
+    const listParams = buildListParams(req.query, true);
     const { invoices, total } = await invoiceService.listInvoices(
       req.user.tenantId,
-      {
-        ...pagination,
-        status,
-        search,
-        dateFrom: dateFrom || startDate,
-        dateTo: dateTo || endDate,
-        minAmount,
-        maxAmount,
-      }
+      listParams
     );
-    const meta = buildPaginationMeta(pagination.page, pagination.limit, total);
+    const meta = buildPaginationMeta(listParams.page, listParams.limit, total);
     return paginated(res, invoices, meta);
+  }
+
+  async exportList(req, res) {
+    const invoices = await invoiceService.exportInvoices(
+      req.user.tenantId,
+      buildListParams(req.query)
+    );
+
+    return sendCSV(res, toExportRows(invoices), 'invoices.csv', INVOICE_EXPORT_FIELDS);
   }
 
   async getById(req, res) {

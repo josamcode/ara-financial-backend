@@ -9,10 +9,16 @@ const { Parser } = require('json2csv');
  * @returns {string} CSV string
  */
 function toCSV(data, fields) {
-  if (!data || data.length === 0) return '';
+  const rows = Array.isArray(data) ? data : [];
+  if (rows.length === 0 && (!fields || fields.length === 0)) return '';
   const opts = fields ? { fields } : {};
   const parser = new Parser(opts);
-  return parser.parse(data);
+
+  if (rows.length === 0) {
+    return fields.join(',');
+  }
+
+  return parser.parse(rows);
 }
 
 /**
@@ -20,9 +26,9 @@ function toCSV(data, fields) {
  */
 function sendCSV(res, data, filename, fields) {
   const csv = toCSV(data, fields);
-  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-  return res.send(csv);
+  return res.send(`\uFEFF${csv}`);
 }
 
 module.exports = { toCSV, sendCSV };

@@ -86,6 +86,22 @@ class BillService {
     return { bills, total };
   }
 
+  async exportBills(tenantId, { status, search, dateFrom, dateTo, minAmount, maxAmount } = {}) {
+    const filter = this._buildListFilter(tenantId, {
+      status,
+      search,
+      dateFrom,
+      dateTo,
+      minAmount,
+      maxAmount,
+    });
+
+    return Bill.find(filter)
+      .select('billNumber supplierName status total paidAmount remainingAmount issueDate dueDate')
+      .sort({ issueDate: -1, billNumber: -1 })
+      .lean();
+  }
+
   async getBillById(billId, tenantId) {
     const bill = await Bill.findOne({ _id: billId, tenantId })
       .populate({ path: 'createdBy', select: 'name email', match: { tenantId } })

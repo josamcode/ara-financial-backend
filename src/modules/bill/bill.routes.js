@@ -30,6 +30,12 @@ router.get(
   asyncHandler(controller.list)
 );
 
+router.get(
+  '/export',
+  authorize(PERMISSIONS.BILL_READ),
+  asyncHandler(controller.exportList)
+);
+
 router.post(
   '/bulk/cancel',
   authorize(PERMISSIONS.BILL_CREATE),
