@@ -23,6 +23,26 @@ const tenantSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    companyEmail: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      maxlength: 320,
+      match: [/^\S+@\S+\.\S+$/, 'Invalid company email'],
+      default: null,
+    },
+    companyPhone: {
+      type: String,
+      trim: true,
+      maxlength: 50,
+      default: null,
+    },
+    companyAddress: {
+      type: String,
+      trim: true,
+      maxlength: 500,
+      default: null,
+    },
     baseCurrency: {
       type: String,
       default: 'EGP',

@@ -2,8 +2,18 @@
 
 const Tenant = require('./tenant.model');
 const auditService = require('../audit/audit.service');
-const { NotFoundError, ForbiddenError } = require('../../common/errors');
+const { BadRequestError, NotFoundError } = require('../../common/errors');
+const { deleteTenantLogo, uploadTenantLogo } = require('../../config/cloudinary');
 const logger = require('../../config/logger');
+
+function normalizeOptionalString(value) {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== 'string') return value;
+
+  const trimmed = value.trim();
+  return trimmed || null;
+}
 
 class TenantService {
   /**
@@ -27,6 +37,9 @@ class TenantService {
       legalName: tenant.legalName,
       taxId: tenant.taxId,
       logoUrl: tenant.logoUrl,
+      companyEmail: tenant.companyEmail,
+      companyPhone: tenant.companyPhone,
+      companyAddress: tenant.companyAddress,
       industry: tenant.industry,
       fiscalYearStartMonth: tenant.fiscalYearStartMonth,
       settings: {
@@ -37,13 +50,24 @@ class TenantService {
     };
 
     const allowedFields = [
-      'name', 'legalName', 'taxId', 'logoUrl', 'industry',
+      'name', 'legalName', 'taxId', 'logoUrl', 'companyEmail', 'companyPhone',
+      'companyAddress', 'industry',
       'fiscalYearStartMonth',
     ];
+    const normalizedFields = new Set([
+      'legalName',
+      'taxId',
+      'logoUrl',
+      'companyEmail',
+      'companyPhone',
+      'companyAddress',
+    ]);
 
     for (const field of allowedFields) {
       if (updates[field] !== undefined) {
-        tenant[field] = updates[field];
+        tenant[field] = normalizedFields.has(field)
+          ? normalizeOptionalString(updates[field])
+          : updates[field];
       }
     }
 
@@ -69,6 +93,9 @@ class TenantService {
           legalName: tenant.legalName,
           taxId: tenant.taxId,
           logoUrl: tenant.logoUrl,
+          companyEmail: tenant.companyEmail,
+          companyPhone: tenant.companyPhone,
+          companyAddress: tenant.companyAddress,
           industry: tenant.industry,
           fiscalYearStartMonth: tenant.fiscalYearStartMonth,
           settings: {
@@ -82,6 +109,48 @@ class TenantService {
     }
 
     logger.info({ tenantId }, 'Tenant settings updated');
+    return tenant;
+  }
+
+  /**
+   * Upload and persist tenant logo.
+   */
+  async uploadLogo(tenantId, file, options = {}) {
+    if (!file?.buffer) {
+      throw new BadRequestError('Logo image is required');
+    }
+
+    const tenant = await Tenant.findById(tenantId);
+    if (!tenant) throw new NotFoundError('Tenant not found');
+
+    const oldValues = { logoUrl: tenant.logoUrl };
+    const logoUrl = await uploadTenantLogo({ tenantId, file });
+
+    if (tenant.logoUrl && tenant.logoUrl !== logoUrl) {
+      try {
+        await deleteTenantLogo(tenant.logoUrl);
+      } catch (error) {
+        logger.warn({ tenantId, error, logoUrl: tenant.logoUrl }, 'Failed to delete previous tenant logo');
+      }
+    }
+
+    tenant.logoUrl = logoUrl;
+    await tenant.save();
+
+    if (options.userId) {
+      await auditService.log({
+        tenantId,
+        userId: options.userId,
+        action: 'tenant.logo_updated',
+        resourceType: 'Tenant',
+        resourceId: tenant._id,
+        oldValues,
+        newValues: { logoUrl: tenant.logoUrl },
+        auditContext: options.auditContext,
+      });
+    }
+
+    logger.info({ tenantId }, 'Tenant logo updated');
     return tenant;
   }
 

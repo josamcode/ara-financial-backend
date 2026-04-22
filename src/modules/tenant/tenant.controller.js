@@ -19,6 +19,15 @@ class TenantController {
     return success(res, { tenant });
   }
 
+  async uploadLogo(req, res) {
+    const auditContext = getAuditContext(req);
+    const tenant = await tenantService.uploadLogo(req.user.tenantId, req.file, {
+      userId: req.user.userId,
+      auditContext,
+    });
+    return success(res, { tenant });
+  }
+
   async completeSetup(req, res) {
     const auditContext = getAuditContext(req);
     const tenant = await tenantService.completeSetup(req.user.tenantId, {
