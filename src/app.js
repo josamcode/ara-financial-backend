@@ -72,6 +72,7 @@ function createApp() {
   const supplierRoutes = require('./modules/supplier/supplier.routes');
   const billRoutes = require('./modules/bill/bill.routes');
   const paymentRoutes = require('./modules/payment/payment.routes');
+  const billingRoutes = require('./modules/billing/billing.routes');
 
   app.use('/api/v1/auth', authRoutes);
   app.use('/api/v1/users', userRoutes);
@@ -88,6 +89,7 @@ function createApp() {
   app.use('/api/v1/suppliers', supplierRoutes);
   app.use('/api/v1/bills', billRoutes);
   app.use('/api/v1/payments', paymentRoutes);
+  app.use('/api/v1/billing', billingRoutes);
 
   // ── 404 handler ────────────────────────────────
   app.use((_req, _res, next) => {

@@ -53,6 +53,10 @@ const PERMISSIONS = {
   PAYMENT_READ: 'payment:read',
   PAYMENT_CREATE: 'payment:create',
 
+  // SaaS billing permissions
+  BILLING_READ: 'billing:read',
+  BILLING_MANAGE: 'billing:manage',
+
   // Customer permissions
   CUSTOMER_READ: 'customer:read',
   CUSTOMER_CREATE: 'customer:create',
