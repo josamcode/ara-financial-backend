@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "test": "npm run test:safe",
+    "test:safe": "node scripts/run-safe-tests.js",
     "verify": "node scripts/verify.js",
     "record:journal-transactions": "node scripts/record-journal-transactions.js"
   },

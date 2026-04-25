@@ -3,8 +3,10 @@
 const dotenv = require('dotenv');
 const path = require('path');
 
-// Load .env from project root
-dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+// Load environment from the backend root. Tests use .env.test so they never
+// silently inherit local development or production-like database settings.
+const envFile = process.env.NODE_ENV === 'test' ? '.env.test' : '.env';
+dotenv.config({ path: path.resolve(__dirname, `../../${envFile}`), quiet: true });
 
 /**
  * Validates that all required environment variables are set.

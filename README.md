@@ -15,19 +15,21 @@ Multi-tenant cloud accounting SaaS backend for the MENA region.
 ## Quick Start
 
 ```bash
-# Prerequisites: Node.js 18+, MongoDB, Redis
+# Prerequisites: Node.js 20+, MongoDB, Redis
 
 # 1. Install dependencies
 npm install
 
 # 2. Configure environment
 cp .env.example .env
+cp .env.test.example .env.test
 # Edit .env with your MongoDB/Redis URLs and JWT secret
+# Edit .env.test only with a local/CI test MongoDB URI
 
 # 3. Start development server
 npm run dev
 
-# 4. Run tests
+# 4. Run safe tests
 npm test
 
 # 5. Run the broader verification script
@@ -48,13 +50,16 @@ npm run verify
 | `BCRYPT_ROUNDS`      | No       | `12`                     | Password hashing cost factor |
 | `LOG_LEVEL`          | No       | `debug`                  | Pino log level               |
 
+Tests must use `.env.test` or CI-provided environment variables. The test runner refuses to run unless `NODE_ENV=test` and `MONGODB_URI` points to a database name containing `test` or `ci`. Atlas/`mongodb+srv` URIs are rejected for tests.
+
 ## Scripts
 
 | Script           | Description                                          |
 | ---------------- | ---------------------------------------------------- |
 | `npm run dev`    | Start with nodemon (auto-restart)                    |
 | `npm start`      | Production start                                     |
-| `npm test`       | Run the automated test suite                         |
+| `npm test`       | Run the automated test suite through the safety guard |
+| `npm run test:safe` | Run the automated test suite through the safety guard |
 | `npm run verify` | Run the supplementary end-to-end verification script |
 
 ## Project Structure
