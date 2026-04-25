@@ -104,24 +104,45 @@ function clearPendingMetadata(metadata = {}) {
 }
 
 class BillingService {
-  async ensureDefaultPlans() {
-    const existingCount = await Plan.countDocuments();
-    if (existingCount > 0) return;
+  async seedDefaultPlans() {
+    const now = new Date();
 
     try {
-      await Plan.bulkWrite(
+      const result = await Plan.bulkWrite(
         DEFAULT_PLANS.map((plan) => ({
           updateOne: {
             filter: { code: plan.code },
-            update: { $setOnInsert: plan },
+            update: {
+              $setOnInsert: {
+                ...plan,
+                createdAt: now,
+                updatedAt: now,
+              },
+            },
             upsert: true,
+            timestamps: false,
           },
         })),
-        { ordered: false }
+        { ordered: false, timestamps: false }
       );
+      const plans = await Plan.find({
+        code: { $in: DEFAULT_PLANS.map((plan) => plan.code) },
+      }).sort({ sortOrder: 1, code: 1 });
+
+      return {
+        inserted: result.upsertedCount || 0,
+        matched: result.matchedCount || 0,
+        modified: result.modifiedCount || 0,
+        planCodes: plans.map((plan) => plan.code),
+      };
     } catch (err) {
       if (err?.code !== 11000) throw err;
+      return this.seedDefaultPlans();
     }
+  }
+
+  async ensureDefaultPlans() {
+    await this.seedDefaultPlans();
   }
 
   async listActivePlans() {
@@ -205,7 +226,7 @@ class BillingService {
         lastPaymentAttemptId: paymentAttemptId,
         metadata: pendingMetadata,
       },
-      { new: true }
+      { returnDocument: 'after' }
     ).populate('planId');
 
     await auditService.log({
@@ -362,7 +383,7 @@ class BillingService {
         cancelledAt: null,
         metadata: nextMetadata,
       },
-      { new: true }
+      { returnDocument: 'after' }
     ).populate('planId');
 
     if (!updated) {
@@ -442,7 +463,7 @@ class BillingService {
         },
       },
       {
-        new: true,
+        returnDocument: 'after',
         upsert: true,
       }
     ).populate('planId');

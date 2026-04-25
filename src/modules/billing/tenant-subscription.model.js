@@ -11,14 +11,12 @@ const tenantSubscriptionSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Plan',
       required: true,
-      index: true,
     },
     status: {
       type: String,
       enum: SUBSCRIPTION_STATUSES,
       required: true,
       default: 'trialing',
-      index: true,
     },
     trialEndsAt: {
       type: Date,
@@ -67,6 +65,7 @@ const tenantSubscriptionSchema = new mongoose.Schema(
 
 tenantSubscriptionSchema.plugin(tenantPlugin);
 
+tenantSubscriptionSchema.path('tenantId')._index = false;
 tenantSubscriptionSchema.index({ tenantId: 1 }, { unique: true });
 tenantSubscriptionSchema.index({ status: 1 });
 tenantSubscriptionSchema.index({ planId: 1 });

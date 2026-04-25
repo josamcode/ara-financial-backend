@@ -9,6 +9,8 @@
     "test": "npm run test:safe",
     "test:safe": "node scripts/run-safe-tests.js",
     "verify": "node scripts/verify.js",
+    "billing:seed": "node scripts/seed-billing-plans.js",
+    "billing:smoke": "node scripts/smoke-billing.js",
     "record:journal-transactions": "node scripts/record-journal-transactions.js"
   },
   "keywords": [

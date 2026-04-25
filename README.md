@@ -34,6 +34,10 @@ npm test
 
 # 5. Run the broader verification script
 npm run verify
+
+# 6. Seed and smoke-check SaaS billing support
+npm run billing:seed
+npm run billing:smoke
 ```
 
 ## Environment Variables
@@ -61,6 +65,26 @@ Tests must use `.env.test` or CI-provided environment variables. The test runner
 | `npm test`       | Run the automated test suite through the safety guard |
 | `npm run test:safe` | Run the automated test suite through the safety guard |
 | `npm run verify` | Run the supplementary end-to-end verification script |
+| `npm run billing:seed` | Safely upsert default SaaS billing plans by code |
+| `npm run billing:smoke` | Run the billing smoke check without calling MyFatoorah by default |
+
+## SaaS Billing Support
+
+Default SaaS plans can be safely inserted with:
+
+```bash
+npm run billing:seed
+```
+
+The seed uses plan `code` upserts and only inserts missing defaults. Existing plan pricing or custom metadata is not overwritten.
+
+Run the backend billing smoke check with:
+
+```bash
+npm run billing:smoke
+```
+
+The smoke check refuses production-like MongoDB URIs and does not call MyFatoorah by default. Real checkout requires `MYFATOORAH_TOKEN`, `MYFATOORAH_BASE_URL`, and `MYFATOORAH_CALLBACK_BASE_URL`; set `BILLING_SMOKE_ENABLE_PAYMENT=true` only when intentionally testing the provider.
 
 ## Project Structure
 
@@ -128,4 +152,4 @@ src/
 - Outbound email delivery is not built in. Invite flows return one-time invitation tokens to the authorized inviter, and forgot-password only exposes reset tokens when `EXPOSE_EMAIL_ACTION_TOKENS=true`.
 - The verification script is a supplementary regression check, not a replacement for the automated test suite.
 - Invoice/bill features do not yet include tax calculation, e-invoicing, recurring invoices, or outbound email delivery.
-- Multi-currency, tax engine, SaaS subscription billing, payment gateway integration, OAuth/SSO/2FA, webhooks, and AI features are not implemented in this backend yet.
+- Multi-currency, tax engine, billing limits enforcement, OAuth/SSO/2FA, webhooks, and AI features are not implemented in this backend yet.
