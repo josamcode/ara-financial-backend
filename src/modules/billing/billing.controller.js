@@ -1,6 +1,7 @@
 'use strict';
 
 const billingService = require('./billing.service');
+const billingLimitsService = require('./billing-limits.service');
 const { getAuditContext } = require('../../common/utils/audit');
 const { success, created } = require('../../common/utils/response');
 
@@ -13,6 +14,11 @@ const controller = {
   async getSubscription(req, res) {
     const subscription = await billingService.getCurrentSubscription(req.tenantId);
     return success(res, { subscription });
+  },
+
+  async getUsage(req, res) {
+    const usage = await billingLimitsService.getUsageSummary(req.tenantId);
+    return success(res, usage);
   },
 
   async checkout(req, res) {

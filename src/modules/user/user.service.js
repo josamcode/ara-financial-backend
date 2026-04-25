@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const User = require('./user.model');
 const { Role } = require('../auth/role.model');
 const auditService = require('../audit/audit.service');
+const billingLimitsService = require('../billing/billing-limits.service');
 const config = require('../../config');
 const {
   NotFoundError,
@@ -105,6 +106,8 @@ class UserService {
     // Find the role
     const role = await Role.findOne({ tenantId, name: roleName });
     if (!role) throw new BadRequestError(`Role "${roleName}" not found`);
+
+    await billingLimitsService.assertUserLimit(tenantId);
 
     // Generate invitation token
     const invitationToken = crypto.randomBytes(32).toString('hex');

@@ -7,6 +7,7 @@ const { Customer } = require('../customer/customer.model');
 const Tenant = require('../tenant/tenant.model');
 const journalService = require('../journal/journal.service');
 const auditService = require('../audit/audit.service');
+const billingLimitsService = require('../billing/billing-limits.service');
 const { sendEmail } = require('../../common/utils/email');
 const { buildInvoiceEmail } = require('./invoiceEmailTemplate');
 const { BadRequestError, NotFoundError } = require('../../common/errors');
@@ -19,6 +20,8 @@ const {
 
 class InvoiceService {
   async createInvoice(tenantId, userId, data, options = {}) {
+    await billingLimitsService.assertMonthlyInvoiceLimit(tenantId);
+
     const invoiceNumber = await this._getNextInvoiceNumber(tenantId);
 
     let { customerName, customerEmail, customerId } = data;

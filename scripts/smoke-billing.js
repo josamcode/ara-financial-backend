@@ -11,11 +11,15 @@ const mongoose = require('mongoose');
 const { connectDatabase, disconnectDatabase } = require('../src/config/database');
 const { disconnectRedis } = require('../src/config/redis');
 const billingService = require('../src/modules/billing/billing.service');
+const billingLimitsService = require('../src/modules/billing/billing-limits.service');
 const paymentService = require('../src/modules/payment/payment.service');
 const Tenant = require('../src/modules/tenant/tenant.model');
 const { Plan } = require('../src/modules/billing/plan.model');
 const { TenantSubscription } = require('../src/modules/billing/tenant-subscription.model');
 const { PaymentAttempt } = require('../src/modules/payment/payment.model');
+const User = require('../src/modules/user/user.model');
+const { Role } = require('../src/modules/auth/role.model');
+const { Invoice } = require('../src/modules/invoice/invoice.model');
 
 const SMOKE_AUDIT_CONTEXT = Object.freeze({
   ip: 'script://smoke-billing',
@@ -34,6 +38,28 @@ function assert(condition, label) {
 
   console.log(`FAIL: ${label}`);
   failed++;
+}
+
+async function assertDoesNotThrow(fn, label) {
+  try {
+    await fn();
+    assert(true, label);
+  } catch (error) {
+    console.log(`Unexpected error for "${label}": ${error.code || error.message}`);
+    assert(false, label);
+  }
+}
+
+async function assertRejectsCode(fn, expectedCode, label) {
+  try {
+    await fn();
+    assert(false, label);
+  } catch (error) {
+    assert(error?.code === expectedCode, label);
+    if (error?.code !== expectedCode) {
+      console.log(`Expected ${expectedCode}, received ${error?.code || error?.message}`);
+    }
+  }
 }
 
 function isTrue(value) {
@@ -61,9 +87,13 @@ async function createSmokeTenant() {
 async function cleanupSmokeTenant(tenantId) {
   if (!tenantId) return;
 
+  await Invoice.deleteMany({ tenantId });
+  await User.deleteMany({ tenantId });
+  await Role.deleteMany({ tenantId });
   await PaymentAttempt.deleteMany({ tenantId });
   await TenantSubscription.deleteMany({ tenantId });
   await mongoose.connection.collection('auditlogs').deleteMany({ tenantId }).catch(() => {});
+  await Plan.deleteMany({ code: /^smoke-limits-/ });
   await Tenant.deleteOne({ _id: tenantId });
 }
 
@@ -147,6 +177,203 @@ function stubVerifyPaymentAttempt() {
   };
 }
 
+async function createSmokeLimitsPlan(tenantId, limits) {
+  return Plan.findOneAndUpdate(
+    { code: `smoke-limits-${tenantId.toString()}` },
+    {
+      $set: {
+        name: 'Smoke Limits',
+        description: 'Temporary billing smoke limits plan.',
+        price: mongoose.Types.Decimal128.fromString('0'),
+        currency: 'SAR',
+        billingCycle: 'monthly',
+        features: ['Smoke limits'],
+        limits,
+        isActive: true,
+        sortOrder: 9999,
+      },
+    },
+    {
+      upsert: true,
+      returnDocument: 'after',
+    }
+  );
+}
+
+async function setSmokeSubscription(tenantId, planId, status) {
+  const now = new Date();
+  const currentPeriodEnd = new Date(now);
+  currentPeriodEnd.setUTCMonth(currentPeriodEnd.getUTCMonth() + 1);
+
+  return TenantSubscription.findOneAndUpdate(
+    { tenantId },
+    {
+      $set: {
+        planId,
+        status,
+        currentPeriodStart: now,
+        currentPeriodEnd,
+        cancelAtPeriodEnd: false,
+      },
+      $setOnInsert: {
+        tenantId,
+      },
+    },
+    {
+      upsert: true,
+      returnDocument: 'after',
+    }
+  );
+}
+
+async function createSmokeRole(tenantId) {
+  return Role.create({
+    tenantId,
+    name: 'accountant',
+    label: 'Smoke Accountant',
+    permissions: [],
+    isSystem: false,
+  });
+}
+
+async function createSmokeUser(tenantId, roleId) {
+  const suffix = `${Date.now()}_${Math.round(Math.random() * 100000)}`;
+
+  return User.create({
+    tenantId,
+    roleId,
+    email: `billing_limits_${suffix}@example.com`,
+    passwordHash: 'SmokePassword123!',
+    name: 'Billing Limits Smoke',
+    isActive: true,
+    emailVerified: true,
+  });
+}
+
+async function createSmokeInvoice(tenantId, userId) {
+  const amount = mongoose.Types.Decimal128.fromString('25');
+  const now = new Date();
+  const dueDate = new Date(now);
+  dueDate.setUTCDate(dueDate.getUTCDate() + 7);
+
+  return Invoice.create({
+    tenantId,
+    invoiceNumber: `SMOKE-${Date.now()}`,
+    customerName: 'Smoke Customer',
+    customerEmail: 'billing-smoke@example.com',
+    issueDate: now,
+    dueDate,
+    status: 'draft',
+    currency: 'SAR',
+    lineItems: [
+      {
+        description: 'Smoke service',
+        quantity: mongoose.Types.Decimal128.fromString('1'),
+        unitPrice: amount,
+        lineTotal: amount,
+      },
+    ],
+    subtotal: amount,
+    total: amount,
+    paidAmount: 0,
+    remainingAmount: 25,
+    payments: [],
+    notes: '',
+    createdBy: userId,
+  });
+}
+
+function hasDefaultLimitKeys(plan) {
+  return (
+    plan?.limits &&
+    Object.prototype.hasOwnProperty.call(plan.limits, 'users') &&
+    Object.prototype.hasOwnProperty.call(plan.limits, 'invoicesPerMonth')
+  );
+}
+
+async function runLimitsSmoke(tenant, userId) {
+  const defaultPlans = await Plan.find({
+    code: { $in: ['free', 'basic', 'pro', 'enterprise'] },
+  });
+  assert(
+    defaultPlans.length >= 4 && defaultPlans.every(hasDefaultLimitKeys),
+    'default billing plans have users and invoicesPerMonth limits'
+  );
+
+  const limitPlan = await createSmokeLimitsPlan(tenant._id, {
+    users: 1,
+    invoicesPerMonth: 1,
+  });
+  await setSmokeSubscription(tenant._id, limitPlan._id, 'trialing');
+
+  const role = await createSmokeRole(tenant._id);
+  const smokeUser = await createSmokeUser(tenant._id, role._id);
+
+  let usageSummary = await billingLimitsService.getUsageSummary(tenant._id);
+  assert(
+    usageSummary.usage.users.used === 1 &&
+      usageSummary.usage.users.limit === 1 &&
+      usageSummary.usage.users.remaining === 0,
+    'usage summary computes user usage'
+  );
+
+  await assertRejectsCode(
+    () => billingLimitsService.assertUserLimit(tenant._id),
+    'PLAN_LIMIT_EXCEEDED',
+    'user limit guard blocks when over limit'
+  );
+
+  await createSmokeInvoice(tenant._id, smokeUser._id);
+
+  usageSummary = await billingLimitsService.getUsageSummary(tenant._id);
+  assert(
+    usageSummary.usage.invoicesPerMonth.used === 1 &&
+      usageSummary.usage.invoicesPerMonth.limit === 1 &&
+      usageSummary.usage.invoicesPerMonth.remaining === 0,
+    'usage summary computes monthly invoice usage'
+  );
+
+  await assertRejectsCode(
+    () => billingLimitsService.assertMonthlyInvoiceLimit(tenant._id),
+    'PLAN_LIMIT_EXCEEDED',
+    'invoice limit guard blocks when over limit'
+  );
+
+  limitPlan.limits = {
+    users: 10,
+    invoicesPerMonth: 10,
+  };
+  await limitPlan.save();
+
+  await setSmokeSubscription(tenant._id, limitPlan._id, 'trialing');
+  await assertDoesNotThrow(
+    () => billingLimitsService.assertUserLimit(tenant._id),
+    'trialing subscription allows restricted writes within limits'
+  );
+
+  await setSmokeSubscription(tenant._id, limitPlan._id, 'active');
+  await assertDoesNotThrow(
+    () => billingLimitsService.assertMonthlyInvoiceLimit(tenant._id),
+    'active subscription allows restricted writes within limits'
+  );
+
+  for (const status of ['expired', 'cancelled', 'past_due']) {
+    await setSmokeSubscription(tenant._id, limitPlan._id, status);
+    await assertRejectsCode(
+      () => billingLimitsService.assertSubscriptionAllowsWrite(tenant._id),
+      'SUBSCRIPTION_INACTIVE',
+      `${status} subscription blocks restricted writes`
+    );
+  }
+
+  await TenantSubscription.deleteOne({ tenantId: tenant._id });
+  await assertRejectsCode(
+    () => billingLimitsService.assertSubscriptionAllowsWrite(tenant._id),
+    'SUBSCRIPTION_REQUIRED',
+    'missing subscription blocks restricted writes'
+  );
+}
+
 async function runNonProviderSmoke(tenant, userId) {
   const seedResult = await billingService.seedDefaultPlans();
   assert(seedResult.planCodes.includes('free'), 'default free plan is present');
@@ -158,6 +385,8 @@ async function runNonProviderSmoke(tenant, userId) {
   const subscription = await billingService.getCurrentSubscription(tenant._id);
   assert(subscription.status === 'trialing', 'default tenant subscription is trialing');
   assert(subscription.planId?.code === 'free', 'default tenant subscription uses free plan');
+
+  await runLimitsSmoke(tenant, userId);
 
   const payablePlan = await findPayablePlan();
   assert(Boolean(payablePlan), 'a payable active billing plan exists for checkout smoke');

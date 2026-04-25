@@ -47,6 +47,12 @@ router.get(
   asyncHandler(controller.getSubscription)
 );
 
+router.get(
+  '/usage',
+  authorizeAny(PERMISSIONS.BILLING_READ, PERMISSIONS.BILLING_MANAGE),
+  asyncHandler(controller.getUsage)
+);
+
 router.post(
   '/checkout',
   authorize(PERMISSIONS.BILLING_MANAGE),

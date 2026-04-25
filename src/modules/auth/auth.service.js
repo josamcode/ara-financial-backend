@@ -10,6 +10,7 @@ const User = require('../user/user.model');
 const Tenant = require('../tenant/tenant.model');
 const { Role, seedDefaultRoles, getEffectivePermissions } = require('./role.model');
 const auditService = require('../audit/audit.service');
+const billingLimitsService = require('../billing/billing-limits.service');
 const {
   UnauthorizedError,
   ConflictError,
@@ -267,6 +268,8 @@ class AuthService {
     if (!role) {
       throw new BadRequestError('User role not found');
     }
+
+    await billingLimitsService.assertUserLimit(user.tenantId);
 
     user.passwordHash = password;
     if (name) user.name = name;

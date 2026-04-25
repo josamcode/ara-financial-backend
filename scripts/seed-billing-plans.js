@@ -4,7 +4,8 @@
  * Safely seeds SaaS billing plans.
  *
  * The seed is idempotent and uses $setOnInsert by plan code, so existing
- * custom names, limits, or pricing are not overwritten.
+ * custom names, configured limits, or pricing are not overwritten. Missing
+ * default limit keys are filled safely for default plans.
  */
 
 const { connectDatabase, disconnectDatabase } = require('../src/config/database');
@@ -21,8 +22,9 @@ async function main() {
     console.log(`Inserted: ${result.inserted}`);
     console.log(`Existing matched: ${result.matched}`);
     console.log(`Modified: ${result.modified}`);
+    console.log(`Missing default limits filled: ${result.limitsModified || 0}`);
     console.log(`Default plan codes present: ${result.planCodes.join(', ')}`);
-    console.log('Existing plans are left unchanged; placeholder prices are only inserted when missing.');
+    console.log('Existing pricing and configured limits are left unchanged.');
   } finally {
     await disconnectDatabase();
     await disconnectRedis();

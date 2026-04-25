@@ -11,6 +11,25 @@ const { BadRequestError, NotFoundError } = require('../../common/errors');
 const RESOURCE_TYPE = 'TenantSubscription';
 const SUBSCRIPTION_REFERENCE_TYPE = 'subscription';
 
+const DEFAULT_PLAN_LIMITS = Object.freeze({
+  free: Object.freeze({
+    users: 1,
+    invoicesPerMonth: 10,
+  }),
+  basic: Object.freeze({
+    users: 3,
+    invoicesPerMonth: 100,
+  }),
+  pro: Object.freeze({
+    users: 10,
+    invoicesPerMonth: 1000,
+  }),
+  enterprise: Object.freeze({
+    users: null,
+    invoicesPerMonth: null,
+  }),
+});
+
 const DEFAULT_PLANS = [
   {
     code: 'free',
@@ -20,7 +39,7 @@ const DEFAULT_PLANS = [
     currency: 'SAR',
     billingCycle: 'monthly',
     features: ['Basic access'],
-    limits: {},
+    limits: { ...DEFAULT_PLAN_LIMITS.free },
     isActive: true,
     sortOrder: 0,
   },
@@ -32,7 +51,7 @@ const DEFAULT_PLANS = [
     currency: 'SAR',
     billingCycle: 'monthly',
     features: ['Core finance workspace'],
-    limits: {},
+    limits: { ...DEFAULT_PLAN_LIMITS.basic },
     isActive: true,
     sortOrder: 10,
   },
@@ -44,7 +63,7 @@ const DEFAULT_PLANS = [
     currency: 'SAR',
     billingCycle: 'monthly',
     features: ['Expanded finance workspace'],
-    limits: {},
+    limits: { ...DEFAULT_PLAN_LIMITS.pro },
     isActive: true,
     sortOrder: 20,
   },
@@ -56,7 +75,7 @@ const DEFAULT_PLANS = [
     currency: 'SAR',
     billingCycle: 'monthly',
     features: ['Custom enterprise setup'],
-    limits: {},
+    limits: { ...DEFAULT_PLAN_LIMITS.enterprise },
     isActive: true,
     sortOrder: 30,
   },
@@ -125,6 +144,7 @@ class BillingService {
         })),
         { ordered: false, timestamps: false }
       );
+      const limitUpdateResult = await this._setMissingDefaultPlanLimits(now);
       const plans = await Plan.find({
         code: { $in: DEFAULT_PLANS.map((plan) => plan.code) },
       }).sort({ sortOrder: 1, code: 1 });
@@ -132,7 +152,8 @@ class BillingService {
       return {
         inserted: result.upsertedCount || 0,
         matched: result.matchedCount || 0,
-        modified: result.modifiedCount || 0,
+        modified: (result.modifiedCount || 0) + limitUpdateResult.modified,
+        limitsModified: limitUpdateResult.modified,
         planCodes: plans.map((plan) => plan.code),
       };
     } catch (err) {
@@ -143,6 +164,50 @@ class BillingService {
 
   async ensureDefaultPlans() {
     await this.seedDefaultPlans();
+  }
+
+  async _setMissingDefaultPlanLimits(now = new Date()) {
+    let modified = 0;
+
+    for (const plan of DEFAULT_PLANS) {
+      const initialized = await Plan.updateOne(
+        {
+          code: plan.code,
+          $or: [
+            { limits: { $exists: false } },
+            { limits: null },
+          ],
+        },
+        {
+          $set: {
+            limits: {},
+            updatedAt: now,
+          },
+        },
+        { timestamps: false }
+      );
+      modified += initialized.modifiedCount || 0;
+
+      for (const [key, value] of Object.entries(plan.limits || {})) {
+        const updated = await Plan.updateOne(
+          {
+            code: plan.code,
+            limits: { $type: 'object' },
+            [`limits.${key}`]: { $exists: false },
+          },
+          {
+            $set: {
+              [`limits.${key}`]: value,
+              updatedAt: now,
+            },
+          },
+          { timestamps: false }
+        );
+        modified += updated.modifiedCount || 0;
+      }
+    }
+
+    return { modified };
   }
 
   async listActivePlans() {
