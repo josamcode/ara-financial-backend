@@ -12,8 +12,9 @@ function formatDate(date) {
 
 /**
  * Builds the invoice email subject and HTML body.
+ * v1 intentionally sends invoice details only: no attachment and no public/protected invoice link.
  */
-function buildInvoiceEmail({ invoice, companyName, invoiceUrl }) {
+function buildInvoiceEmail({ invoice, companyName }) {
   const subject = `فاتورة رقم ${invoice.invoiceNumber} من ${companyName}`;
 
   const dueDateLine = invoice.dueDate
@@ -22,10 +23,6 @@ function buildInvoiceEmail({ invoice, companyName, invoiceUrl }) {
 
   const remainingLine = invoice.remainingAmount != null
     ? `<tr><td style="padding:4px 0;color:#555;">المبلغ المتبقي:</td><td style="padding:4px 0;font-weight:600;">${formatAmount(invoice.remainingAmount, invoice.currency)}</td></tr>`
-    : '';
-
-  const viewLink = invoiceUrl
-    ? `<p style="margin:24px 0 0;"><a href="${invoiceUrl}" style="background:#1d4ed8;color:#fff;padding:10px 20px;border-radius:4px;text-decoration:none;font-size:14px;">عرض الفاتورة</a></p>`
     : '';
 
   const html = `<!DOCTYPE html>
@@ -55,7 +52,6 @@ function buildInvoiceEmail({ invoice, companyName, invoiceUrl }) {
             ${remainingLine}
             ${dueDateLine}
           </table>
-          ${viewLink}
           <p style="margin:32px 0 0;color:#999;font-size:12px;">هذه الرسالة أُرسلت تلقائياً من نظام ARA Financial.</p>
         </td></tr>
       </table>

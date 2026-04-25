@@ -5,9 +5,19 @@ const config = require('../../config');
 const logger = require('../../config/logger');
 const { BadRequestError } = require('../errors');
 
+function getMissingSmtpFields({ host, user, pass }) {
+  const missingFields = [];
+  if (!host) missingFields.push('SMTP_HOST');
+  if (!user) missingFields.push('SMTP_USER');
+  if (!pass) missingFields.push('SMTP_PASS');
+  return missingFields;
+}
+
 function createTransport() {
   const { host, port, user, pass } = config.smtp;
-  if (!host || !user || !pass) {
+  const missingFields = getMissingSmtpFields({ host, user, pass });
+  if (missingFields.length > 0) {
+    logger.warn({ missingFields }, 'SMTP email service is not configured');
     return null;
   }
   return nodemailer.createTransport({
@@ -24,10 +34,7 @@ function createTransport() {
 async function sendEmail({ to, subject, html }) {
   const transport = createTransport();
   if (!transport) {
-    throw new BadRequestError(
-      'Email service is not configured. Set SMTP_HOST, SMTP_USER, and SMTP_PASS.',
-      'EMAIL_NOT_CONFIGURED'
-    );
+    throw new BadRequestError('Email service is not configured', 'EMAIL_NOT_CONFIGURED');
   }
 
   const from = config.smtp.from || config.smtp.user;

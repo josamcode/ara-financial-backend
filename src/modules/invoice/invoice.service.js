@@ -11,7 +11,6 @@ const { sendEmail } = require('../../common/utils/email');
 const { buildInvoiceEmail } = require('./invoiceEmailTemplate');
 const { BadRequestError, NotFoundError } = require('../../common/errors');
 const logger = require('../../config/logger');
-const config = require('../../config');
 const { MONEY_FACTOR, toScaledInteger } = require('../../common/utils/money');
 const {
   buildInvoiceStatusFilter,
@@ -765,11 +764,7 @@ class InvoiceService {
     const tenant = await Tenant.findById(tenantId).lean();
     const companyName = tenant?.name || 'ARA Financial';
 
-    const invoiceUrl = config.urls.appBaseUrl
-      ? `${config.urls.appBaseUrl}/invoices/${invoiceId}/print`
-      : null;
-
-    const { subject, html } = buildInvoiceEmail({ invoice, companyName, invoiceUrl });
+    const { subject, html } = buildInvoiceEmail({ invoice, companyName });
 
     await sendEmail({ to: email, subject, html });
 
