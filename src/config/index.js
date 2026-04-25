@@ -79,6 +79,7 @@ const config = {
 
   urls: {
     appBaseUrl: process.env.APP_BASE_URL || process.env.FRONTEND_URL || null,
+    frontendAppUrl: process.env.FRONTEND_APP_URL || process.env.FRONTEND_URL || null,
   },
 
   smtp: {

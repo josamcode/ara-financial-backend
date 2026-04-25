@@ -64,6 +64,12 @@ router.post(
 );
 
 router.get(
+  '/myfatoorah/resolve',
+  authorizeAny(PERMISSIONS.PAYMENT_READ, PERMISSIONS.PAYMENT_CREATE),
+  asyncHandler(controller.resolveByPaymentId)
+);
+
+router.get(
   '/:id',
   authorize(PERMISSIONS.PAYMENT_READ),
   validate({ params: paymentAttemptParamsSchema }),

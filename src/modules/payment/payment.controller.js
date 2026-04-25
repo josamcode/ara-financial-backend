@@ -10,6 +10,15 @@ const {
   buildPaginationMeta,
 } = require('../../common/utils/response');
 
+function redirectToPaymentResult(req, res, result) {
+  const redirectUrl = paymentService.buildPaymentResultUrl(req.query, result);
+  if (!redirectUrl) {
+    return success(res, result);
+  }
+
+  return res.redirect(302, redirectUrl);
+}
+
 const controller = {
   async list(req, res) {
     const params = {
@@ -59,12 +68,23 @@ const controller = {
     return success(res, result);
   },
 
+  async resolveByPaymentId(req, res) {
+    const paymentId = req.query.paymentId || req.query.PaymentId || req.query.Id;
+    const result = await paymentService.resolveByPaymentId(
+      req.tenantId,
+      req.user.userId,
+      paymentId,
+      { auditContext: getAuditContext(req) }
+    );
+    return success(res, result);
+  },
+
   async handleMyFatoorahCallback(req, res) {
     const result = await paymentService.handleMyFatoorahCallback(req.query, {
       auditContext: getAuditContext(req),
     });
 
-    return success(res, result);
+    return redirectToPaymentResult(req, res, result);
   },
 
   async handleMyFatoorahError(req, res) {
@@ -72,7 +92,7 @@ const controller = {
       auditContext: getAuditContext(req),
     });
 
-    return success(res, result);
+    return redirectToPaymentResult(req, res, result);
   },
 };
 

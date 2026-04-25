@@ -134,15 +134,47 @@ function logStatusVerificationFailure(err, source) {
 }
 
 class PaymentService {
-  _getCallbackUrls() {
-    const baseUrl = normalizeBaseUrl(config.myfatoorah?.callbackBaseUrl);
-    if (!baseUrl) {
-      throw new AppError('Payment gateway callback URL is not configured', 500, 'PAYMENT_CALLBACK_URL_NOT_CONFIGURED');
+  buildPaymentResultUrl(query = {}, result = {}) {
+    const frontendUrl = normalizeBaseUrl(config.urls?.frontendAppUrl);
+    if (!frontendUrl) return null;
+
+    const redirectUrl = new URL(`${frontendUrl}/billing/payment-result`);
+    Object.entries(query || {}).forEach(([key, value]) => {
+      if (value === undefined || value === null) return;
+
+      const values = Array.isArray(value) ? value : [value];
+      values.forEach((item) => {
+        if (item === undefined || item === null) return;
+        redirectUrl.searchParams.append(key, String(item));
+      });
+    });
+
+    const paymentKey = query.paymentId || query.PaymentId || query.Id || query.id;
+    if (paymentKey && !redirectUrl.searchParams.has('paymentId')) {
+      redirectUrl.searchParams.set('paymentId', String(paymentKey));
     }
 
+    if (result.status && !redirectUrl.searchParams.has('status')) {
+      redirectUrl.searchParams.set('status', String(result.status));
+    }
+
+    return redirectUrl.toString();
+  }
+
+  _getCallbackUrls() {
+    const resultUrl = this.buildPaymentResultUrl();
+    if (resultUrl) {
+      return { callbackUrl: resultUrl, errorUrl: resultUrl };
+    }
+
+    // Fallback: backend endpoints handle the redirect (returns JSON — no frontend URL configured)
+    const backendBaseUrl = normalizeBaseUrl(config.myfatoorah?.callbackBaseUrl);
+    if (!backendBaseUrl) {
+      throw new AppError('Payment gateway callback URL is not configured', 500, 'PAYMENT_CALLBACK_URL_NOT_CONFIGURED');
+    }
     return {
-      callbackUrl: `${baseUrl}/api/v1/payments/myfatoorah/callback`,
-      errorUrl: `${baseUrl}/api/v1/payments/myfatoorah/error`,
+      callbackUrl: `${backendBaseUrl}/api/v1/payments/myfatoorah/callback`,
+      errorUrl: `${backendBaseUrl}/api/v1/payments/myfatoorah/error`,
     };
   }
 
@@ -695,6 +727,32 @@ class PaymentService {
       providerInvoiceId: paymentAttempt.providerInvoiceId,
       providerPaymentId: paymentAttempt.providerPaymentId,
     };
+  }
+  async resolveByPaymentId(tenantId, userId, paymentId, options = {}) {
+    if (!paymentId) {
+      return {
+        verified: false,
+        status: 'invalid',
+        paymentAttempt: null,
+        message: 'Payment identifier is missing',
+      };
+    }
+
+    const result = await this._processMyFatoorahRedirect(
+      { paymentId },
+      { ...options, source: 'frontend-resolve' }
+    );
+
+    let paymentAttempt = null;
+    if (result.paymentAttemptId) {
+      const attempt = await PaymentAttempt.findOne({
+        _id: result.paymentAttemptId,
+        tenantId,
+      });
+      paymentAttempt = attempt ? this._toPublicAttempt(attempt) : null;
+    }
+
+    return { ...result, paymentAttempt };
   }
 }
 
