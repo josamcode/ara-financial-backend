@@ -93,6 +93,17 @@ const config = {
     cacheTtlSeconds: parseInt(process.env.REPORT_CACHE_TTL_SECONDS, 10) || 60,
   },
 
+  myfatoorah: {
+    token: process.env.MYFATOORAH_TOKEN || null,
+    baseUrl: process.env.MYFATOORAH_BASE_URL || null,
+    callbackBaseUrl: process.env.MYFATOORAH_CALLBACK_BASE_URL || null,
+    paymentMethodId: process.env.MYFATOORAH_PAYMENT_METHOD_ID || null,
+  },
+
+  payment: {
+    flowLogsEnabled: parseBoolean(process.env.PAYMENT_FLOW_LOGS_ENABLED, false),
+  },
+
   logging: {
     level: process.env.LOG_LEVEL || (process.env.NODE_ENV === 'production' ? 'info' : 'debug'),
   },
@@ -117,6 +128,16 @@ function parseCsv(value) {
     .split(',')
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function parseBoolean(value, defaultValue = false) {
+  if (value === undefined || value === null || value === '') return defaultValue;
+
+  const normalized = String(value).trim().toLowerCase();
+  if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+  if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+
+  return defaultValue;
 }
 
 function parseTrustProxy(value, env) {

@@ -49,6 +49,10 @@ const PERMISSIONS = {
   INVOICE_DELETE: 'invoice:delete',
   INVOICE_SEND: 'invoice:send',
 
+  // Payment permissions
+  PAYMENT_READ: 'payment:read',
+  PAYMENT_CREATE: 'payment:create',
+
   // Customer permissions
   CUSTOMER_READ: 'customer:read',
   CUSTOMER_CREATE: 'customer:create',
