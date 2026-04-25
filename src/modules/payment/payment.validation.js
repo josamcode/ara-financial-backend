@@ -1,6 +1,7 @@
 'use strict';
 
 const { z } = require('zod');
+const { PAYMENT_PROVIDERS, PAYMENT_STATUSES } = require('./payment.model');
 
 const objectIdPattern = /^[0-9a-fA-F]{24}$/;
 const decimalPattern = /^\d+(\.\d{1,6})?$/;
@@ -21,6 +22,20 @@ const optionalObjectId = z
   .optional()
   .nullable();
 
+function optionalPositiveInteger(max) {
+  return z.preprocess(
+    (value) => {
+      if (value === undefined || value === null || value === '') return undefined;
+      return Number(value);
+    },
+    z.number().int().min(1).max(max).optional()
+  );
+}
+
+const idParamSchema = z.object({
+  id: z.string().regex(objectIdPattern, 'id must be a valid ObjectId'),
+});
+
 const createMyFatoorahPaymentSchema = z.object({
   amount: positiveDecimal,
   currency: z.string().trim().min(1).max(10).default('EGP'),
@@ -38,6 +53,19 @@ const createMyFatoorahPaymentSchema = z.object({
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
+const listPaymentAttemptsQuerySchema = z.object({
+  status: z.enum(PAYMENT_STATUSES).optional(),
+  provider: z.enum(PAYMENT_PROVIDERS).optional(),
+  referenceType: z
+    .string()
+    .trim()
+    .regex(safeReferenceTypePattern, 'referenceType contains invalid characters')
+    .optional(),
+  referenceId: optionalObjectId,
+  page: optionalPositiveInteger(100000),
+  limit: optionalPositiveInteger(100),
+});
+
 const myFatoorahCallbackQuerySchema = z.object({
   paymentId: z.string().trim().min(1).optional(),
   PaymentId: z.string().trim().min(1).optional(),
@@ -47,5 +75,7 @@ const myFatoorahCallbackQuerySchema = z.object({
 
 module.exports = {
   createMyFatoorahPaymentSchema,
+  listPaymentAttemptsQuerySchema,
+  paymentAttemptParamsSchema: idParamSchema,
   myFatoorahCallbackQuerySchema,
 };

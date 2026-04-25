@@ -6,7 +6,7 @@ const myfatoorahClient = require('./myfatoorah.client');
 const auditService = require('../audit/audit.service');
 const config = require('../../config');
 const logger = require('../../config/logger');
-const { AppError } = require('../../common/errors');
+const { AppError, BadRequestError, NotFoundError } = require('../../common/errors');
 
 const PROVIDER = 'myfatoorah';
 const RESOURCE_TYPE = 'PaymentAttempt';
@@ -154,10 +154,10 @@ class PaymentService {
     return output;
   }
 
-  async _audit({ attempt, action, newValues, auditContext }) {
+  async _audit({ attempt, action, newValues, auditContext, userId }) {
     await auditService.log({
       tenantId: attempt.tenantId,
-      userId: attempt.createdBy,
+      userId: userId || attempt.createdBy,
       action,
       resourceType: RESOURCE_TYPE,
       resourceId: attempt._id,
@@ -179,6 +179,50 @@ class PaymentService {
     }
 
     return method.PaymentMethodId;
+  }
+
+  _buildListFilter(tenantId, { status, provider, referenceType, referenceId } = {}) {
+    const filter = { tenantId };
+    if (status) filter.status = status;
+    if (provider) filter.provider = provider;
+    if (referenceType) filter.referenceType = referenceType;
+    if (referenceId) filter.referenceId = referenceId;
+    return filter;
+  }
+
+  async listPaymentAttempts(tenantId, { skip = 0, limit = 20, status, provider, referenceType, referenceId } = {}) {
+    const filter = this._buildListFilter(tenantId, {
+      status,
+      provider,
+      referenceType,
+      referenceId,
+    });
+
+    const [paymentAttempts, total] = await Promise.all([
+      PaymentAttempt.find(filter)
+        .sort({ createdAt: -1, _id: -1 })
+        .skip(skip)
+        .limit(limit),
+      PaymentAttempt.countDocuments(filter),
+    ]);
+
+    return {
+      paymentAttempts: paymentAttempts.map((attempt) => this._toPublicAttempt(attempt)),
+      total,
+    };
+  }
+
+  async getPaymentAttemptById(tenantId, paymentAttemptId) {
+    const paymentAttempt = await PaymentAttempt.findOne({
+      _id: paymentAttemptId,
+      tenantId,
+    });
+
+    if (!paymentAttempt) {
+      throw new NotFoundError('Payment attempt not found');
+    }
+
+    return this._toPublicAttempt(paymentAttempt);
   }
 
   _buildExecutePaymentPayload({ attempt, paymentMethodId }) {
@@ -321,6 +365,52 @@ class PaymentService {
     });
   }
 
+  async verifyPaymentAttempt(tenantId, userId, paymentAttemptId, options = {}) {
+    const attempt = await PaymentAttempt.findOne({
+      _id: paymentAttemptId,
+      tenantId,
+    });
+
+    if (!attempt) {
+      throw new NotFoundError('Payment attempt not found');
+    }
+
+    if (attempt.provider !== PROVIDER) {
+      throw new BadRequestError('Only MyFatoorah payment attempts can be verified', 'PAYMENT_PROVIDER_UNSUPPORTED');
+    }
+
+    const providerPaymentId = asString(attempt.providerPaymentId);
+    const providerInvoiceId = asString(attempt.providerInvoiceId);
+    const key = providerPaymentId || providerInvoiceId;
+    const keyType = providerPaymentId ? 'PaymentId' : 'InvoiceId';
+
+    if (!key) {
+      throw new BadRequestError(
+        'Payment attempt has no provider identifier to verify',
+        'PAYMENT_PROVIDER_IDENTIFIER_MISSING'
+      );
+    }
+
+    const statusResponse = await myfatoorahClient.getPaymentStatus({ key, keyType });
+    const verification = await this._applyProviderStatusToAttempt({
+      attempt,
+      statusResponse,
+      fallbackPaymentId: providerPaymentId,
+      auditContext: options.auditContext,
+      source: 'manual',
+      userId,
+    });
+    const updatedAttempt = await PaymentAttempt.findOne({
+      _id: attempt._id,
+      tenantId,
+    });
+
+    return {
+      paymentAttempt: this._toPublicAttempt(updatedAttempt || attempt),
+      verification,
+    };
+  }
+
   async _processMyFatoorahRedirect(query, options = {}) {
     const paymentKey = query.paymentId || query.PaymentId || query.Id || query.id;
     if (!paymentKey) {
@@ -368,6 +458,28 @@ class PaymentService {
       };
     }
 
+    return this._applyProviderStatusToAttempt({
+      attempt,
+      statusResponse,
+      fallbackPaymentId: paymentKey,
+      auditContext: options.auditContext,
+      source: options.source,
+    });
+  }
+
+  async _applyProviderStatusToAttempt({
+    attempt,
+    statusResponse,
+    fallbackPaymentId,
+    auditContext,
+    source,
+    userId,
+  }) {
+    const statusData = statusResponse?.Data || {};
+    const providerInvoiceId = asString(statusData.InvoiceId) || asString(attempt.providerInvoiceId);
+    const providerPaymentId = getProviderPaymentId(statusData, fallbackPaymentId || attempt.providerPaymentId);
+    const mappedStatus = mapInvoiceStatus(statusData.InvoiceStatus);
+
     await this._audit({
       attempt,
       action: 'payment.verified',
@@ -378,20 +490,9 @@ class PaymentService {
         providerInvoiceId,
         providerPaymentId,
       },
-      auditContext: options.auditContext,
+      auditContext,
+      userId,
     });
-
-    if (attempt.status === 'paid') {
-      return {
-        verified: true,
-        status: 'paid',
-        source: options.source,
-        alreadyProcessed: true,
-        paymentAttemptId: attempt._id,
-        providerInvoiceId,
-        providerPaymentId,
-      };
-    }
 
     if (mappedStatus === 'paid') {
       return this._markAttemptPaid({
@@ -399,8 +500,9 @@ class PaymentService {
         statusResponse,
         providerInvoiceId,
         providerPaymentId,
-        auditContext: options.auditContext,
-        source: options.source,
+        auditContext,
+        source,
+        userId,
       });
     }
 
@@ -410,8 +512,9 @@ class PaymentService {
       statusResponse,
       providerInvoiceId,
       providerPaymentId,
-      auditContext: options.auditContext,
-      source: options.source,
+      auditContext,
+      source,
+      userId,
     });
   }
 
@@ -442,6 +545,7 @@ class PaymentService {
     providerPaymentId,
     auditContext,
     source,
+    userId,
   }) {
     const statusData = statusResponse?.Data || {};
     const providerAmount = parseProviderAmount(statusData.InvoiceValue);
@@ -461,6 +565,7 @@ class PaymentService {
         auditContext,
         source,
         failureReason: 'Provider amount mismatch',
+        userId,
       });
     }
 
@@ -475,6 +580,7 @@ class PaymentService {
         auditContext,
         source,
         failureReason: 'Provider customer reference mismatch',
+        userId,
       });
     }
 
@@ -512,6 +618,7 @@ class PaymentService {
           paidAt: now,
         },
         auditContext,
+        userId,
       });
     }
 
@@ -535,6 +642,7 @@ class PaymentService {
     auditContext,
     source,
     failureReason,
+    userId,
   }) {
     const statusData = statusResponse?.Data || {};
     const nextStatus = status === 'paid' ? 'failed' : status;
@@ -574,6 +682,7 @@ class PaymentService {
           reason,
         },
         auditContext,
+        userId,
       });
     }
 
