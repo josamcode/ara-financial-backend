@@ -222,9 +222,12 @@ class JournalService {
 
     // Re-validate balance before posting (safety net)
     const lines = entry.lines.map((l) => ({
+      accountId: l.accountId?.toString(),
       debit: l.debit.toString(),
       credit: l.credit.toString(),
+      description: l.description || '',
     }));
+    await this._validateLines(tenantId, lines);
     this._validateBalance(lines);
 
     const period = await this._requireOpenFiscalPeriod(tenantId, entry.date);
@@ -375,7 +378,11 @@ class JournalService {
    * Validates all line account references.
    */
   async _validateLines(tenantId, lines) {
-    const accountIds = [...new Set(lines.map((l) => l.accountId))];
+    const normalizedLines = lines.map((line) => ({
+      ...line,
+      accountId: this._normalizeAccountId(line?.accountId),
+    }));
+    const accountIds = [...new Set(normalizedLines.map((line) => line.accountId))];
 
     const accounts = await Account.find({
       _id: { $in: accountIds },
@@ -384,10 +391,11 @@ class JournalService {
 
     const accountMap = new Map(accounts.map((a) => [a._id.toString(), a]));
 
-    for (const line of lines) {
+    for (let index = 0; index < normalizedLines.length; index += 1) {
+      const line = normalizedLines[index];
       const account = accountMap.get(line.accountId);
       if (!account) {
-        throw new ValidationError(`Account ${line.accountId} not found`);
+        throw new ValidationError(`Account on line ${index + 1} was not found`);
       }
       if (!account.isActive) {
         throw new ValidationError(`Account "${account.nameEn}" (${account.code}) is frozen/inactive`);
@@ -398,6 +406,18 @@ class JournalService {
         );
       }
     }
+  }
+
+  _normalizeAccountId(accountId) {
+    const normalized = typeof accountId === 'string'
+      ? accountId.trim()
+      : accountId?.toString?.() ?? '';
+
+    if (!mongoose.Types.ObjectId.isValid(normalized)) {
+      throw new ValidationError('Account ID must be a valid ObjectId');
+    }
+
+    return normalized;
   }
 
   /**

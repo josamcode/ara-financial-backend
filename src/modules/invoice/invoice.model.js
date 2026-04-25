@@ -82,6 +82,8 @@ const invoiceSchema = new mongoose.Schema(
     sentAt: { type: Date, default: null },
     paidAt: { type: Date, default: null },
     cancelledAt: { type: Date, default: null },
+    lastEmailSentAt: { type: Date, default: null },
+    emailSentCount: { type: Number, default: 0 },
   },
   {
     timestamps: true,

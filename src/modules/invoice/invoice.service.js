@@ -4,10 +4,15 @@ const mongoose = require('mongoose');
 const { Invoice } = require('./invoice.model');
 const InvoiceCounter = require('./invoiceCounter.model');
 const { Customer } = require('../customer/customer.model');
+const Tenant = require('../tenant/tenant.model');
 const journalService = require('../journal/journal.service');
 const auditService = require('../audit/audit.service');
+const { sendEmail } = require('../../common/utils/email');
+const { buildInvoiceEmail } = require('./invoiceEmailTemplate');
 const { BadRequestError, NotFoundError } = require('../../common/errors');
 const logger = require('../../config/logger');
+const config = require('../../config');
+const { MONEY_FACTOR, toScaledInteger } = require('../../common/utils/money');
 const {
   buildInvoiceStatusFilter,
   COLLECTIBLE_INVOICE_STATUSES,
@@ -18,30 +23,43 @@ class InvoiceService {
     const invoiceNumber = await this._getNextInvoiceNumber(tenantId);
 
     let { customerName, customerEmail, customerId } = data;
-    if (customerId) {
-      const customer = await Customer.findOne({ _id: customerId, tenantId, deletedAt: null });
-      if (customer) {
-        customerName = customer.name;
-        customerEmail = customer.email || customerEmail || '';
-      }
+    const customer = await this._resolveCustomer(tenantId, customerId);
+    if (customer) {
+      customerId = customer._id.toString();
+      customerName = customer.name;
+      customerEmail = customer.email || customerEmail || '';
     }
+
+    const draftInvoice = this._normalizeDraftInvoiceInput({
+      customerId,
+      customerName,
+      customerEmail,
+      issueDate: data.issueDate,
+      dueDate: data.dueDate,
+      currency: data.currency,
+      lineItems: data.lineItems,
+      subtotal: data.subtotal,
+      total: data.total,
+      notes: data.notes,
+    });
+    this._assertValidDraftInvoice(draftInvoice);
 
     const invoice = await Invoice.create({
       tenantId,
       invoiceNumber,
-      customerId: customerId || null,
-      customerName,
-      customerEmail: customerEmail || '',
-      issueDate: new Date(data.issueDate),
-      dueDate: new Date(data.dueDate),
-      currency: data.currency || 'EGP',
-      lineItems: this._buildLineItems(data.lineItems),
-      subtotal: mongoose.Types.Decimal128.fromString(data.subtotal),
-      total: mongoose.Types.Decimal128.fromString(data.total),
+      customerId: draftInvoice.customerId || null,
+      customerName: draftInvoice.customerName,
+      customerEmail: draftInvoice.customerEmail,
+      issueDate: draftInvoice.issueDate,
+      dueDate: draftInvoice.dueDate,
+      currency: draftInvoice.currency,
+      lineItems: this._buildLineItems(draftInvoice.lineItems),
+      subtotal: mongoose.Types.Decimal128.fromString(draftInvoice.subtotal),
+      total: mongoose.Types.Decimal128.fromString(draftInvoice.total),
       paidAmount: 0,
-      remainingAmount: Number(data.total),
+      remainingAmount: Number(draftInvoice.total),
       payments: [],
-      notes: data.notes || '',
+      notes: draftInvoice.notes,
       status: 'draft',
       createdBy: userId,
     });
@@ -52,7 +70,7 @@ class InvoiceService {
       action: 'invoice.created',
       resourceType: 'Invoice',
       resourceId: invoice._id,
-      newValues: { invoiceNumber, customerName: data.customerName },
+      newValues: { invoiceNumber, customerName: draftInvoice.customerName },
       auditContext: options.auditContext,
     });
 
@@ -134,36 +152,52 @@ class InvoiceService {
       throw new BadRequestError('Only draft invoices can be edited');
     }
 
+    let customerId = invoice.customerId ? invoice.customerId.toString() : null;
+    let customerName = invoice.customerName;
+    let customerEmail = invoice.customerEmail || '';
+
     if (data.customerId !== undefined) {
       if (data.customerId) {
-        const customer = await Customer.findOne({ _id: data.customerId, tenantId, deletedAt: null });
-        if (customer) {
-          invoice.customerId = customer._id;
-          invoice.customerName = customer.name;
-          invoice.customerEmail = customer.email || invoice.customerEmail;
-        }
+        const customer = await this._resolveCustomer(tenantId, data.customerId);
+        customerId = customer._id.toString();
+        customerName = customer.name;
+        customerEmail = customer.email || customerEmail;
       } else {
-        invoice.customerId = null;
-        if (data.customerName !== undefined) invoice.customerName = data.customerName;
-        if (data.customerEmail !== undefined) invoice.customerEmail = data.customerEmail;
+        customerId = null;
+        if (data.customerName !== undefined) customerName = data.customerName;
+        if (data.customerEmail !== undefined) customerEmail = data.customerEmail;
       }
     } else {
-      if (data.customerName !== undefined) invoice.customerName = data.customerName;
-      if (data.customerEmail !== undefined) invoice.customerEmail = data.customerEmail;
+      if (data.customerName !== undefined) customerName = data.customerName;
+      if (data.customerEmail !== undefined) customerEmail = data.customerEmail;
     }
-    if (data.issueDate) invoice.issueDate = new Date(data.issueDate);
-    if (data.dueDate) invoice.dueDate = new Date(data.dueDate);
-    if (data.currency) invoice.currency = data.currency;
-    if (data.notes !== undefined) invoice.notes = data.notes;
-    if (data.lineItems) {
-      invoice.lineItems = this._buildLineItems(data.lineItems);
-    }
-    if (data.subtotal) invoice.subtotal = mongoose.Types.Decimal128.fromString(data.subtotal);
-    if (data.total) {
-      invoice.total = mongoose.Types.Decimal128.fromString(data.total);
-      invoice.paidAmount = 0;
-      invoice.remainingAmount = Number(data.total);
-    }
+
+    const draftInvoice = this._normalizeDraftInvoiceInput({
+      customerId,
+      customerName,
+      customerEmail,
+      issueDate: data.issueDate ?? invoice.issueDate,
+      dueDate: data.dueDate ?? invoice.dueDate,
+      currency: data.currency ?? invoice.currency,
+      lineItems: data.lineItems ?? this._serializeLineItems(invoice.lineItems),
+      subtotal: data.subtotal ?? invoice.subtotal,
+      total: data.total ?? invoice.total,
+      notes: data.notes !== undefined ? data.notes : invoice.notes,
+    });
+    this._assertValidDraftInvoice(draftInvoice);
+
+    invoice.customerId = draftInvoice.customerId || null;
+    invoice.customerName = draftInvoice.customerName;
+    invoice.customerEmail = draftInvoice.customerEmail;
+    invoice.issueDate = draftInvoice.issueDate;
+    invoice.dueDate = draftInvoice.dueDate;
+    invoice.currency = draftInvoice.currency;
+    invoice.notes = draftInvoice.notes;
+    invoice.lineItems = this._buildLineItems(draftInvoice.lineItems);
+    invoice.subtotal = mongoose.Types.Decimal128.fromString(draftInvoice.subtotal);
+    invoice.total = mongoose.Types.Decimal128.fromString(draftInvoice.total);
+    invoice.paidAmount = 0;
+    invoice.remainingAmount = Number(draftInvoice.total);
 
     await invoice.save();
 
@@ -190,6 +224,19 @@ class InvoiceService {
     if (invoice.status !== 'draft') {
       throw new BadRequestError('Only draft invoices can be marked as sent');
     }
+
+    this._assertValidDraftInvoice(this._normalizeDraftInvoiceInput({
+      customerId: invoice.customerId,
+      customerName: invoice.customerName,
+      customerEmail: invoice.customerEmail,
+      issueDate: invoice.issueDate,
+      dueDate: invoice.dueDate,
+      currency: invoice.currency,
+      lineItems: this._serializeLineItems(invoice.lineItems),
+      subtotal: invoice.subtotal,
+      total: invoice.total,
+      notes: invoice.notes,
+    }));
 
     const totalStr = invoice.total.toString();
     const sendDescription = `إرسال فاتورة - ${invoice.invoiceNumber}`;
@@ -252,6 +299,9 @@ class InvoiceService {
     const paymentAmount = this._roundMonetaryAmount(Number(amount));
     if (!Number.isFinite(paymentAmount) || paymentAmount <= 0) {
       throw new BadRequestError('Payment amount must be greater than zero');
+    }
+    if (remainingAmount <= 0) {
+      throw new BadRequestError('Invoice has no remaining amount to pay');
     }
     if (paymentAmount > remainingAmount) {
       throw new BadRequestError('Payment amount cannot exceed remaining amount');
@@ -325,7 +375,7 @@ class InvoiceService {
       throw new NotFoundError('One or more invoices not found');
     }
 
-    if (invoices.some((invoice) => ['paid', 'cancelled'].includes(invoice.status))) {
+    if (invoices.some((invoice) => !this._canCancelInvoice(invoice))) {
       throw new BadRequestError('One or more selected invoices cannot be cancelled');
     }
 
@@ -339,8 +389,14 @@ class InvoiceService {
   async cancelInvoice(invoiceId, tenantId, userId, options = {}) {
     const invoice = await Invoice.findOne({ _id: invoiceId, tenantId });
     if (!invoice) throw new NotFoundError('Invoice not found');
-    if (['paid', 'cancelled'].includes(invoice.status)) {
-      throw new BadRequestError('Paid or already cancelled invoices cannot be cancelled');
+    if (invoice.status === 'cancelled') {
+      throw new BadRequestError('Invoice is already cancelled');
+    }
+    if (invoice.status === 'paid') {
+      throw new BadRequestError('Paid invoices cannot be cancelled');
+    }
+    if (!this._canCancelInvoice(invoice)) {
+      throw new BadRequestError('Invoices with recorded payments cannot be cancelled');
     }
 
     invoice.status = 'cancelled';
@@ -401,10 +457,138 @@ class InvoiceService {
   _buildLineItems(items) {
     return items.map((item) => ({
       description: item.description,
-      quantity: mongoose.Types.Decimal128.fromString(item.quantity),
-      unitPrice: mongoose.Types.Decimal128.fromString(item.unitPrice),
-      lineTotal: mongoose.Types.Decimal128.fromString(item.lineTotal),
+      quantity: mongoose.Types.Decimal128.fromString(this._moneyToString(item.quantity)),
+      unitPrice: mongoose.Types.Decimal128.fromString(this._moneyToString(item.unitPrice)),
+      lineTotal: mongoose.Types.Decimal128.fromString(this._moneyToString(item.lineTotal)),
     }));
+  }
+
+  _serializeLineItems(items) {
+    return (items || []).map((item) => ({
+      description: item.description,
+      quantity: this._moneyToString(item.quantity),
+      unitPrice: this._moneyToString(item.unitPrice),
+      lineTotal: this._moneyToString(item.lineTotal),
+    }));
+  }
+
+  _normalizeDraftInvoiceInput(data) {
+    return {
+      customerId: this._normalizeOptionalObjectId(data.customerId, 'Customer ID'),
+      customerName: data.customerName,
+      customerEmail: data.customerEmail || '',
+      issueDate: data.issueDate instanceof Date ? data.issueDate : new Date(data.issueDate),
+      dueDate: data.dueDate instanceof Date ? data.dueDate : new Date(data.dueDate),
+      currency: data.currency || 'EGP',
+      lineItems: Array.isArray(data.lineItems)
+        ? data.lineItems.map((item) => ({
+          description: item.description,
+          quantity: this._moneyToString(item.quantity),
+          unitPrice: this._moneyToString(item.unitPrice),
+          lineTotal: this._moneyToString(item.lineTotal),
+        }))
+        : [],
+      subtotal: this._moneyToString(data.subtotal),
+      total: this._moneyToString(data.total),
+      notes: data.notes || '',
+    };
+  }
+
+  _assertValidDraftInvoice(invoice) {
+    if (!Array.isArray(invoice.lineItems) || invoice.lineItems.length === 0) {
+      throw new BadRequestError('Invoice must contain at least one line item');
+    }
+
+    const subtotal = this._parseMoney(invoice.subtotal, 'Invoice subtotal');
+    const total = this._parseMoney(invoice.total, 'Invoice total');
+    let subtotalFromLines = 0n;
+
+    invoice.lineItems.forEach((item, index) => {
+      const lineNumber = index + 1;
+      const quantity = this._parseMoney(item.quantity, `Invoice line ${lineNumber} quantity`);
+      const unitPrice = this._parseMoney(item.unitPrice, `Invoice line ${lineNumber} unit price`);
+      const lineTotal = this._parseMoney(item.lineTotal, `Invoice line ${lineNumber} line total`);
+
+      if (quantity <= 0n) {
+        throw new BadRequestError(`Invoice line ${lineNumber} quantity must be greater than zero`);
+      }
+      if (unitPrice < 0n) {
+        throw new BadRequestError(`Invoice line ${lineNumber} unit price cannot be negative`);
+      }
+      if (lineTotal < 0n) {
+        throw new BadRequestError(`Invoice line ${lineNumber} line total cannot be negative`);
+      }
+
+      const expectedLineTotal = ((quantity * unitPrice) + (MONEY_FACTOR / 2n)) / MONEY_FACTOR;
+      if (lineTotal !== expectedLineTotal) {
+        throw new BadRequestError(
+          `Invoice line ${lineNumber} line total must equal quantity x unit price`
+        );
+      }
+
+      subtotalFromLines += lineTotal;
+    });
+
+    if (subtotal <= 0n) {
+      throw new BadRequestError('Invoice subtotal must be greater than zero');
+    }
+    if (total <= 0n) {
+      throw new BadRequestError('Invoice total must be greater than zero');
+    }
+    if (subtotal !== subtotalFromLines) {
+      throw new BadRequestError('Invoice subtotal must equal the sum of line totals');
+    }
+    if (total !== subtotal) {
+      throw new BadRequestError('Invoice total must equal subtotal');
+    }
+  }
+
+  _parseMoney(value, label) {
+    try {
+      return toScaledInteger(this._moneyToString(value));
+    } catch (_error) {
+      throw new BadRequestError(`${label} must be a valid decimal amount`);
+    }
+  }
+
+  _moneyToString(value) {
+    if (value === undefined || value === null) return '';
+    if (typeof value === 'string') return value.trim();
+    if (typeof value === 'number') return String(value);
+    if (typeof value?.toString === 'function') return value.toString();
+    return String(value);
+  }
+
+  _normalizeOptionalObjectId(value, label) {
+    const normalized = typeof value === 'string' ? value.trim() : value?.toString?.() ?? '';
+    if (!normalized) {
+      return null;
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(normalized)) {
+      throw new BadRequestError(`${label} must be a valid ObjectId`);
+    }
+
+    return normalized;
+  }
+
+  async _resolveCustomer(tenantId, customerId) {
+    const normalizedCustomerId = this._normalizeOptionalObjectId(customerId, 'Customer ID');
+    if (!normalizedCustomerId) {
+      return null;
+    }
+
+    const customer = await Customer.findOne({
+      _id: normalizedCustomerId,
+      tenantId,
+      deletedAt: null,
+    });
+
+    if (!customer) {
+      throw new NotFoundError('Customer not found');
+    }
+
+    return customer;
   }
 
   _roundMonetaryAmount(value) {
@@ -422,6 +606,18 @@ class InvoiceService {
     }
     if (invoice.status === 'paid') return 0;
     return this._roundMonetaryAmount(totalAmount - paidAmount);
+  }
+
+  _canCancelInvoice(invoice) {
+    if (!invoice || ['paid', 'cancelled', 'partially_paid'].includes(invoice.status)) {
+      return false;
+    }
+
+    const totalAmount = this._roundMonetaryAmount(Number(invoice.total?.toString() ?? 0));
+    const paidAmount = this._resolvePaidAmount(invoice, totalAmount);
+    const hasPayments = Array.isArray(invoice.payments) && invoice.payments.length > 0;
+
+    return paidAmount <= 0 && !hasPayments;
   }
 
   _buildListFilter(tenantId, { status, search, dateFrom, dateTo, minAmount, maxAmount }) {
@@ -555,6 +751,43 @@ class InvoiceService {
       }
       throw err;
     }
+  }
+
+  async emailInvoice(invoiceId, tenantId, userId, options = {}) {
+    const invoice = await Invoice.findOne({ _id: invoiceId, tenantId });
+    if (!invoice) throw new NotFoundError('Invoice not found');
+
+    const email = invoice.customerEmail?.trim();
+    if (!email) {
+      throw new BadRequestError('Customer email is missing', 'CUSTOMER_EMAIL_MISSING');
+    }
+
+    const tenant = await Tenant.findById(tenantId).lean();
+    const companyName = tenant?.name || 'ARA Financial';
+
+    const invoiceUrl = config.urls.appBaseUrl
+      ? `${config.urls.appBaseUrl}/invoices/${invoiceId}/print`
+      : null;
+
+    const { subject, html } = buildInvoiceEmail({ invoice, companyName, invoiceUrl });
+
+    await sendEmail({ to: email, subject, html });
+
+    invoice.lastEmailSentAt = new Date();
+    invoice.emailSentCount = (invoice.emailSentCount || 0) + 1;
+    await invoice.save();
+
+    await auditService.log({
+      tenantId,
+      userId,
+      action: 'invoice.email_sent',
+      resourceType: 'Invoice',
+      resourceId: invoice._id,
+      newValues: { sentTo: email, sentAt: invoice.lastEmailSentAt },
+      auditContext: options.auditContext,
+    });
+
+    return invoice;
   }
 }
 

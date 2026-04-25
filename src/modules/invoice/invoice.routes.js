@@ -79,6 +79,12 @@ router.post(
 );
 
 router.post(
+  '/:id/email',
+  authorize(PERMISSIONS.INVOICE_SEND),
+  asyncHandler(controller.emailInvoice)
+);
+
+router.post(
   '/:id/cancel',
   authorize(PERMISSIONS.INVOICE_UPDATE),
   asyncHandler(controller.cancel)

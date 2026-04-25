@@ -8,6 +8,7 @@ const journalService = require('../journal/journal.service');
 const auditService = require('../audit/audit.service');
 const { BadRequestError, NotFoundError } = require('../../common/errors');
 const logger = require('../../config/logger');
+const { MONEY_FACTOR, toScaledInteger } = require('../../common/utils/money');
 const {
   buildBillStatusFilter,
   PAYABLE_BILL_STATUSES,
@@ -22,30 +23,43 @@ class BillService {
     const billNumber = await this._getNextBillNumber(tenantId);
 
     let { supplierName, supplierEmail, supplierId } = data;
-    if (supplierId) {
-      const supplier = await Supplier.findOne({ _id: supplierId, tenantId, deletedAt: null });
-      if (supplier) {
-        supplierName = supplier.name;
-        supplierEmail = supplier.email || supplierEmail || '';
-      }
+    const supplier = await this._resolveSupplier(tenantId, supplierId);
+    if (supplier) {
+      supplierId = supplier._id.toString();
+      supplierName = supplier.name;
+      supplierEmail = supplier.email || supplierEmail || '';
     }
+
+    const draftBill = this._normalizeDraftBillInput({
+      supplierId,
+      supplierName,
+      supplierEmail,
+      issueDate: data.issueDate,
+      dueDate: data.dueDate,
+      currency: data.currency,
+      lineItems: data.lineItems,
+      subtotal: data.subtotal,
+      total: data.total,
+      notes: data.notes,
+    });
+    this._assertValidDraftBill(draftBill);
 
     const bill = await Bill.create({
       tenantId,
       billNumber,
-      supplierId: supplierId || null,
-      supplierName,
-      supplierEmail: supplierEmail || '',
-      issueDate: new Date(data.issueDate),
-      dueDate: new Date(data.dueDate),
-      currency: data.currency || 'EGP',
-      lineItems: this._buildLineItems(data.lineItems),
-      subtotal: mongoose.Types.Decimal128.fromString(data.subtotal),
-      total: mongoose.Types.Decimal128.fromString(data.total),
+      supplierId: draftBill.supplierId || null,
+      supplierName: draftBill.supplierName,
+      supplierEmail: draftBill.supplierEmail,
+      issueDate: draftBill.issueDate,
+      dueDate: draftBill.dueDate,
+      currency: draftBill.currency,
+      lineItems: this._buildLineItems(draftBill.lineItems),
+      subtotal: mongoose.Types.Decimal128.fromString(draftBill.subtotal),
+      total: mongoose.Types.Decimal128.fromString(draftBill.total),
       paidAmount: 0,
-      remainingAmount: Number(data.total),
+      remainingAmount: Number(draftBill.total),
       payments: [],
-      notes: data.notes || '',
+      notes: draftBill.notes,
       status: 'draft',
       createdBy: userId,
     });
@@ -143,6 +157,19 @@ class BillService {
       throw new BadRequestError('Only draft bills can be posted');
     }
 
+    this._assertValidDraftBill(this._normalizeDraftBillInput({
+      supplierId: bill.supplierId,
+      supplierName: bill.supplierName,
+      supplierEmail: bill.supplierEmail,
+      issueDate: bill.issueDate,
+      dueDate: bill.dueDate,
+      currency: bill.currency,
+      lineItems: this._serializeLineItems(bill.lineItems),
+      subtotal: bill.subtotal,
+      total: bill.total,
+      notes: bill.notes,
+    }));
+
     const totalStr = bill.total.toString();
     const postDescription = `Bill posted - ${bill.billNumber}`;
 
@@ -199,6 +226,9 @@ class BillService {
 
     if (!Number.isFinite(paymentAmount) || paymentAmount <= 0) {
       throw new BadRequestError('Payment amount must be greater than zero');
+    }
+    if (remainingAmount <= 0) {
+      throw new BadRequestError('Bill has no remaining amount to pay');
     }
     if (paymentAmount > remainingAmount) {
       throw new BadRequestError('Payment amount cannot exceed remaining amount');
@@ -272,7 +302,7 @@ class BillService {
       throw new NotFoundError('One or more bills not found');
     }
 
-    if (bills.some((bill) => ['paid', 'cancelled'].includes(bill.status))) {
+    if (bills.some((bill) => !this._canCancelBill(bill))) {
       throw new BadRequestError('One or more selected bills cannot be cancelled');
     }
 
@@ -286,8 +316,14 @@ class BillService {
   async cancelBill(billId, tenantId, userId, options = {}) {
     const bill = await Bill.findOne({ _id: billId, tenantId });
     if (!bill) throw new NotFoundError('Bill not found');
-    if (['paid', 'cancelled'].includes(bill.status)) {
-      throw new BadRequestError('Paid or already cancelled bills cannot be cancelled');
+    if (bill.status === 'cancelled') {
+      throw new BadRequestError('Bill is already cancelled');
+    }
+    if (bill.status === 'paid') {
+      throw new BadRequestError('Paid bills cannot be cancelled');
+    }
+    if (!this._canCancelBill(bill)) {
+      throw new BadRequestError('Bills with recorded payments cannot be cancelled');
     }
 
     bill.status = 'cancelled';
@@ -311,10 +347,148 @@ class BillService {
   _buildLineItems(items) {
     return items.map((item) => ({
       description: item.description,
-      quantity: mongoose.Types.Decimal128.fromString(item.quantity),
-      unitPrice: mongoose.Types.Decimal128.fromString(item.unitPrice),
-      lineTotal: mongoose.Types.Decimal128.fromString(item.lineTotal),
+      quantity: mongoose.Types.Decimal128.fromString(this._moneyToString(item.quantity)),
+      unitPrice: mongoose.Types.Decimal128.fromString(this._moneyToString(item.unitPrice)),
+      lineTotal: mongoose.Types.Decimal128.fromString(this._moneyToString(item.lineTotal)),
     }));
+  }
+
+  _serializeLineItems(items) {
+    return (items || []).map((item) => ({
+      description: item.description,
+      quantity: this._moneyToString(item.quantity),
+      unitPrice: this._moneyToString(item.unitPrice),
+      lineTotal: this._moneyToString(item.lineTotal),
+    }));
+  }
+
+  _normalizeDraftBillInput(data) {
+    return {
+      supplierId: this._normalizeOptionalObjectId(data.supplierId, 'Supplier ID'),
+      supplierName: data.supplierName,
+      supplierEmail: data.supplierEmail || '',
+      issueDate: data.issueDate instanceof Date ? data.issueDate : new Date(data.issueDate),
+      dueDate: data.dueDate instanceof Date ? data.dueDate : new Date(data.dueDate),
+      currency: data.currency || 'EGP',
+      lineItems: Array.isArray(data.lineItems)
+        ? data.lineItems.map((item) => ({
+          description: item.description,
+          quantity: this._moneyToString(item.quantity),
+          unitPrice: this._moneyToString(item.unitPrice),
+          lineTotal: this._moneyToString(item.lineTotal),
+        }))
+        : [],
+      subtotal: this._moneyToString(data.subtotal),
+      total: this._moneyToString(data.total),
+      notes: data.notes || '',
+    };
+  }
+
+  _assertValidDraftBill(bill) {
+    if (!Array.isArray(bill.lineItems) || bill.lineItems.length === 0) {
+      throw new BadRequestError('Bill must contain at least one line item');
+    }
+
+    const subtotal = this._parseMoney(bill.subtotal, 'Bill subtotal');
+    const total = this._parseMoney(bill.total, 'Bill total');
+    let subtotalFromLines = 0n;
+
+    bill.lineItems.forEach((item, index) => {
+      const lineNumber = index + 1;
+      const quantity = this._parseMoney(item.quantity, `Bill line ${lineNumber} quantity`);
+      const unitPrice = this._parseMoney(item.unitPrice, `Bill line ${lineNumber} unit price`);
+      const lineTotal = this._parseMoney(item.lineTotal, `Bill line ${lineNumber} line total`);
+
+      if (quantity <= 0n) {
+        throw new BadRequestError(`Bill line ${lineNumber} quantity must be greater than zero`);
+      }
+      if (unitPrice < 0n) {
+        throw new BadRequestError(`Bill line ${lineNumber} unit price cannot be negative`);
+      }
+      if (lineTotal < 0n) {
+        throw new BadRequestError(`Bill line ${lineNumber} line total cannot be negative`);
+      }
+
+      const expectedLineTotal = ((quantity * unitPrice) + (MONEY_FACTOR / 2n)) / MONEY_FACTOR;
+      if (lineTotal !== expectedLineTotal) {
+        throw new BadRequestError(`Bill line ${lineNumber} line total must equal quantity x unit price`);
+      }
+
+      subtotalFromLines += lineTotal;
+    });
+
+    if (subtotal <= 0n) {
+      throw new BadRequestError('Bill subtotal must be greater than zero');
+    }
+    if (total <= 0n) {
+      throw new BadRequestError('Bill total must be greater than zero');
+    }
+    if (subtotal !== subtotalFromLines) {
+      throw new BadRequestError('Bill subtotal must equal the sum of line totals');
+    }
+    if (total !== subtotal) {
+      throw new BadRequestError('Bill total must equal subtotal');
+    }
+  }
+
+  _parseMoney(value, label) {
+    try {
+      return toScaledInteger(this._moneyToString(value));
+    } catch (_error) {
+      throw new BadRequestError(`${label} must be a valid decimal amount`);
+    }
+  }
+
+  _moneyToString(value) {
+    if (value === undefined || value === null) return '';
+    if (typeof value === 'string') return value.trim();
+    if (typeof value === 'number') return String(value);
+    if (typeof value?.toString === 'function') return value.toString();
+    return String(value);
+  }
+
+  _normalizeOptionalObjectId(value, label) {
+    const normalized = typeof value === 'string' ? value.trim() : value?.toString?.() ?? '';
+    if (!normalized) {
+      return null;
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(normalized)) {
+      throw new BadRequestError(`${label} must be a valid ObjectId`);
+    }
+
+    return normalized;
+  }
+
+  async _resolveSupplier(tenantId, supplierId) {
+    const normalizedSupplierId = this._normalizeOptionalObjectId(supplierId, 'Supplier ID');
+    if (!normalizedSupplierId) {
+      return null;
+    }
+
+    const supplier = await Supplier.findOne({
+      _id: normalizedSupplierId,
+      tenantId,
+      deletedAt: null,
+    });
+
+    if (!supplier) {
+      throw new NotFoundError('Supplier not found');
+    }
+
+    return supplier;
+  }
+
+  _canCancelBill(bill) {
+    if (!bill || ['paid', 'cancelled', 'partially_paid'].includes(bill.status)) {
+      return false;
+    }
+
+    const totalAmount = resolveBillTotalAmount(bill);
+    const paidAmount = resolveBillPaidAmount(bill, totalAmount);
+    const hasPayments = Array.isArray(bill.payments) && bill.payments.length > 0;
+
+    return paidAmount <= 0 && !hasPayments;
   }
 
   _buildListFilter(tenantId, { status, search, dateFrom, dateTo, minAmount, maxAmount }) {

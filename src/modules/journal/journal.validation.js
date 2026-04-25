@@ -1,6 +1,9 @@
 'use strict';
 
 const { z } = require('zod');
+const { getJournalLinesValidationMessage } = require('./journal.invariants');
+
+const objectIdPattern = /^[0-9a-fA-F]{24}$/;
 
 // Use string for monetary amounts to avoid floating-point issues
 const monetaryAmount = z.string().regex(
@@ -8,8 +11,12 @@ const monetaryAmount = z.string().regex(
   'Amount must be a valid decimal number (up to 6 decimal places)'
 );
 
+const requiredObjectId = (label) => z
+  .string({ required_error: `${label} is required` })
+  .regex(objectIdPattern, `${label} must be a valid ObjectId`);
+
 const journalLineSchema = z.object({
-  accountId: z.string().min(1, 'Account ID is required'),
+  accountId: requiredObjectId('Account ID'),
   debit: monetaryAmount.optional().default('0'),
   credit: monetaryAmount.optional().default('0'),
   description: z.string().max(500).optional().default(''),
@@ -22,6 +29,15 @@ const createJournalEntrySchema = z.object({
   lines: z
     .array(journalLineSchema)
     .min(2, 'A journal entry must have at least 2 lines'),
+}).superRefine((payload, ctx) => {
+  const message = getJournalLinesValidationMessage(payload.lines);
+  if (message) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['lines'],
+      message,
+    });
+  }
 });
 
 const updateJournalEntrySchema = z.object({
@@ -32,6 +48,19 @@ const updateJournalEntrySchema = z.object({
     .array(journalLineSchema)
     .min(2, 'A journal entry must have at least 2 lines')
     .optional(),
+}).superRefine((payload, ctx) => {
+  if (!payload.lines) {
+    return;
+  }
+
+  const message = getJournalLinesValidationMessage(payload.lines);
+  if (message) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['lines'],
+      message,
+    });
+  }
 });
 
 module.exports = { createJournalEntrySchema, updateJournalEntrySchema };

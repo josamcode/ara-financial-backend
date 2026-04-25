@@ -144,6 +144,14 @@ class InvoiceController {
     );
     return success(res, { message: 'Invoice deleted' });
   }
+
+  async emailInvoice(req, res) {
+    const auditContext = getAuditContext(req);
+    await invoiceService.emailInvoice(
+      req.params.id, req.user.tenantId, req.user.userId, { auditContext }
+    );
+    return success(res, { message: 'Email sent' });
+  }
 }
 
 module.exports = new InvoiceController();

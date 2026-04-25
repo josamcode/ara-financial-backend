@@ -79,6 +79,10 @@ src/
 |   |-- ledger/                     # General ledger (derived views)
 |   |-- report/                     # Financial reports and exports
 |   |-- dashboard/                  # Dashboard summary
+|   |-- customer/                   # Customer master data and statements
+|   |-- supplier/                   # Supplier master data and statements
+|   |-- invoice/                    # AR invoices and payment recording
+|   |-- bill/                       # AP bills and payment recording
 |   `-- audit/                      # Audit log storage and querying
 |-- seeds/                          # Egyptian CoA template
 |-- test/                           # Automated tests
@@ -107,6 +111,9 @@ src/
 - Fiscal period creation, close, lock, and reopen flows
 - Audit logging for core domain actions
 - Dashboard summary endpoints
+- Customer and supplier management
+- Invoice and bill workflows with journal-entry posting/payment links
+- AR/AP aging reports and dashboard AR/AP summaries
 - Automated tests plus the supplementary verification script
 
 ## Implementation Boundaries
@@ -115,3 +122,5 @@ src/
 - Redis is not used for browser/server sessions in this codebase.
 - Outbound email delivery is not built in. Invite flows return one-time invitation tokens to the authorized inviter, and forgot-password only exposes reset tokens when `EXPOSE_EMAIL_ACTION_TOKENS=true`.
 - The verification script is a supplementary regression check, not a replacement for the automated test suite.
+- Invoice/bill features do not yet include tax calculation, e-invoicing, recurring invoices, or outbound email delivery.
+- Multi-currency, tax engine, SaaS subscription billing, payment gateway integration, OAuth/SSO/2FA, webhooks, and AI features are not implemented in this backend yet.

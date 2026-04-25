@@ -79,6 +79,14 @@ const config = {
     appBaseUrl: process.env.APP_BASE_URL || process.env.FRONTEND_URL || null,
   },
 
+  smtp: {
+    host: process.env.SMTP_HOST || null,
+    port: parseInt(process.env.SMTP_PORT, 10) || 587,
+    user: process.env.SMTP_USER || null,
+    pass: process.env.SMTP_PASS || null,
+    from: process.env.SMTP_FROM || null,
+  },
+
   report: {
     cacheTtlSeconds: parseInt(process.env.REPORT_CACHE_TTL_SECONDS, 10) || 60,
   },
