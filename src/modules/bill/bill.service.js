@@ -285,9 +285,8 @@ class BillService {
       notes: bill.notes,
     }));
 
-    const subtotalStr = bill.subtotal.toString();
-    const taxTotalStr = bill.taxTotal?.toString?.() ?? '0';
-    const totalStr = bill.total.toString();
+    const { subtotalStr, taxTotalStr, totalStr } = this._resolvePostingAmounts(bill);
+    const documentTotalStr = bill.total.toString();
     const postDescription = `Bill posted - ${bill.billNumber}`;
     const lines = [
       { accountId: debitAccountId, debit: subtotalStr, credit: '0' },
@@ -320,7 +319,7 @@ class BillService {
     bill.status = 'posted';
     bill.apAccountId = apAccountId;
     bill.paidAmount = 0;
-    bill.remainingAmount = roundMonetaryAmount(Number(totalStr));
+    bill.remainingAmount = roundMonetaryAmount(Number(documentTotalStr));
     bill.postedAt = new Date();
     bill.postedJournalEntryId = entry._id;
     await bill.save();
@@ -553,6 +552,56 @@ class BillService {
       baseTaxTotal: baseTotals.baseTaxTotal,
       baseTotal: baseTotals.baseTotal,
     };
+  }
+
+  _resolvePostingAmounts(bill) {
+    const documentCurrency = this._normalizePostingCurrency(
+      bill.documentCurrency || bill.currency || ''
+    );
+    const baseCurrency = this._normalizePostingCurrency(bill.baseCurrency || 'SAR');
+    const sameCurrency = !documentCurrency || documentCurrency === baseCurrency;
+
+    const documentAmounts = {
+      subtotalStr: this._moneyToString(bill.subtotal || '0'),
+      taxTotalStr: this._moneyToString(bill.taxTotal || '0'),
+      totalStr: this._moneyToString(bill.total || '0'),
+    };
+    const baseAmounts = {
+      subtotalStr: this._moneyToString(bill.baseSubtotal || '0'),
+      taxTotalStr: this._moneyToString(bill.baseTaxTotal || '0'),
+      totalStr: this._moneyToString(bill.baseTotal || '0'),
+    };
+
+    if (this._hasUsableBasePostingAmounts(baseAmounts, documentAmounts)) {
+      return baseAmounts;
+    }
+
+    if (sameCurrency) {
+      return documentAmounts;
+    }
+
+    throw new BadRequestError(
+      'Base currency amounts are required before posting foreign-currency documents',
+      'BASE_AMOUNTS_REQUIRED'
+    );
+  }
+
+  _hasUsableBasePostingAmounts(baseAmounts, documentAmounts) {
+    const baseSubtotal = this._parseMoney(baseAmounts.subtotalStr, 'Bill base subtotal');
+    const baseTaxTotal = this._parseMoney(baseAmounts.taxTotalStr, 'Bill base tax total');
+    const baseTotal = this._parseMoney(baseAmounts.totalStr, 'Bill base total');
+    const documentTaxTotal = this._parseMoney(documentAmounts.taxTotalStr, 'Bill tax total');
+
+    return (
+      baseSubtotal > 0n &&
+      baseTotal > 0n &&
+      baseTaxTotal >= 0n &&
+      (documentTaxTotal === 0n || baseTaxTotal > 0n)
+    );
+  }
+
+  _normalizePostingCurrency(value) {
+    return this._moneyToString(value).toUpperCase();
   }
 
   async _calculateDraftBill(tenantId, bill) {

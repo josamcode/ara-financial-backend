@@ -286,9 +286,8 @@ class InvoiceService {
       notes: invoice.notes,
     }));
 
-    const subtotalStr = invoice.subtotal.toString();
-    const taxTotalStr = invoice.taxTotal?.toString?.() ?? '0';
-    const totalStr = invoice.total.toString();
+    const { subtotalStr, taxTotalStr, totalStr } = this._resolvePostingAmounts(invoice);
+    const documentTotalStr = invoice.total.toString();
     const sendDescription = `إرسال فاتورة - ${invoice.invoiceNumber}`;
 
     const lines = [
@@ -328,7 +327,7 @@ class InvoiceService {
     invoice.status = 'sent';
     invoice.arAccountId = arAccountId;
     invoice.paidAmount = 0;
-    invoice.remainingAmount = Number(totalStr);
+    invoice.remainingAmount = Number(documentTotalStr);
     invoice.sentAt = new Date();
     invoice.sentJournalEntryId = entry._id;
     await invoice.save();
@@ -601,6 +600,56 @@ class InvoiceService {
       baseTaxTotal: baseTotals.baseTaxTotal,
       baseTotal: baseTotals.baseTotal,
     };
+  }
+
+  _resolvePostingAmounts(invoice) {
+    const documentCurrency = this._normalizePostingCurrency(
+      invoice.documentCurrency || invoice.currency || ''
+    );
+    const baseCurrency = this._normalizePostingCurrency(invoice.baseCurrency || 'SAR');
+    const sameCurrency = !documentCurrency || documentCurrency === baseCurrency;
+
+    const documentAmounts = {
+      subtotalStr: this._moneyToString(invoice.subtotal || '0'),
+      taxTotalStr: this._moneyToString(invoice.taxTotal || '0'),
+      totalStr: this._moneyToString(invoice.total || '0'),
+    };
+    const baseAmounts = {
+      subtotalStr: this._moneyToString(invoice.baseSubtotal || '0'),
+      taxTotalStr: this._moneyToString(invoice.baseTaxTotal || '0'),
+      totalStr: this._moneyToString(invoice.baseTotal || '0'),
+    };
+
+    if (this._hasUsableBasePostingAmounts(baseAmounts, documentAmounts)) {
+      return baseAmounts;
+    }
+
+    if (sameCurrency) {
+      return documentAmounts;
+    }
+
+    throw new BadRequestError(
+      'Base currency amounts are required before posting foreign-currency documents',
+      'BASE_AMOUNTS_REQUIRED'
+    );
+  }
+
+  _hasUsableBasePostingAmounts(baseAmounts, documentAmounts) {
+    const baseSubtotal = this._parseMoney(baseAmounts.subtotalStr, 'Invoice base subtotal');
+    const baseTaxTotal = this._parseMoney(baseAmounts.taxTotalStr, 'Invoice base tax total');
+    const baseTotal = this._parseMoney(baseAmounts.totalStr, 'Invoice base total');
+    const documentTaxTotal = this._parseMoney(documentAmounts.taxTotalStr, 'Invoice tax total');
+
+    return (
+      baseSubtotal > 0n &&
+      baseTotal > 0n &&
+      baseTaxTotal >= 0n &&
+      (documentTaxTotal === 0n || baseTaxTotal > 0n)
+    );
+  }
+
+  _normalizePostingCurrency(value) {
+    return this._moneyToString(value).toUpperCase();
   }
 
   async _calculateDraftInvoice(tenantId, invoice) {
