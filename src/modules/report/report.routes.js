@@ -13,6 +13,7 @@ const {
   cashFlowQuerySchema,
   arAgingQuerySchema,
   apAgingQuerySchema,
+  vatReturnQuerySchema,
   trialBalanceExportQuerySchema,
   incomeStatementExportQuerySchema,
   balanceSheetExportQuerySchema,
@@ -59,6 +60,12 @@ router.get(
   authorize(PERMISSIONS.REPORT_VIEW),
   validate({ query: apAgingQuerySchema }),
   asyncHandler(controller.apAging)
+);
+router.get(
+  '/vat-return',
+  authorize(PERMISSIONS.REPORT_VIEW),
+  validate({ query: vatReturnQuerySchema }),
+  asyncHandler(controller.vatReturn)
 );
 
 // Exports

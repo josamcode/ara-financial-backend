@@ -178,6 +178,11 @@ class ReportController {
     return success(res, report);
   }
 
+  async vatReturn(req, res) {
+    const report = await reportService.getVatReturn(req.user.tenantId, req.query);
+    return success(res, report);
+  }
+
   async exportTrialBalance(req, res) {
     const report = await reportService.getTrialBalance(req.user.tenantId, req.query);
     return sendExport(res, {

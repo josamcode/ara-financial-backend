@@ -10,6 +10,10 @@ const { Account } = require('../account/account.model');
 const { FiscalPeriod } = require('../fiscal-period/fiscalPeriod.model');
 const { Invoice } = require('../invoice/invoice.model');
 const { Bill } = require('../bill/bill.model');
+const { TaxRate } = require('../tax/tax-rate.model');
+const {
+  COLLECTIBLE_INVOICE_STATUSES,
+} = require('../invoice/invoice-status');
 const {
   PAYABLE_BILL_STATUSES,
   resolveBillRemainingAmount,
@@ -27,6 +31,12 @@ const RETAINED_EARNINGS_CODE = '3200';
 const CASH_ACCOUNT_PREFIXES = ['111'];
 const AR_AGING_ELIGIBLE_STATUSES = ['sent', 'partially_paid', 'overdue'];
 const AP_AGING_ELIGIBLE_STATUSES = PAYABLE_BILL_STATUSES;
+const VAT_INVOICE_STATUSES = Object.freeze([
+  ...new Set([...COLLECTIBLE_INVOICE_STATUSES, 'paid']),
+]);
+const VAT_BILL_STATUSES = Object.freeze([
+  ...new Set([...PAYABLE_BILL_STATUSES, 'paid']),
+]);
 
 const WORKING_CAPITAL_RULES = Object.freeze([
   { code: '1120', label: 'Accounts Receivable', section: 'operating', multiplier: -1n },
@@ -302,6 +312,61 @@ class ReportService {
         rows,
         asOfDate: toIsoString(primaryParams.asOfDate),
       };
+    });
+  }
+
+  async getVatReturn(tenantId, params = {}) {
+    const primaryParams = this._normalizeVatReturnParams(params);
+
+    return this._getCachedReport('vat-return', tenantId, primaryParams, async () => {
+      const [invoices, bills] = await Promise.all([
+        this._findVatInvoices(tenantId, primaryParams),
+        this._findVatBills(tenantId, primaryParams),
+      ]);
+
+      const groups = new Map();
+      const taxRateIds = new Set();
+      const sales = this._collectVatDocumentLines({
+        documents: invoices,
+        kind: 'sales',
+        includeDetails: primaryParams.includeDetails,
+        taxRateId: primaryParams.taxRateId,
+        groups,
+        taxRateIds,
+      });
+      const purchases = this._collectVatDocumentLines({
+        documents: bills,
+        kind: 'purchases',
+        includeDetails: primaryParams.includeDetails,
+        taxRateId: primaryParams.taxRateId,
+        groups,
+        taxRateIds,
+      });
+
+      const taxRatesById = await this._getTaxRateNamesById(tenantId, Array.from(taxRateIds));
+      const outputVAT = sales.taxAmount;
+      const inputVAT = purchases.taxAmount;
+      const netVAT = outputVAT - inputVAT;
+      const report = {
+        period: toPeriodRange(primaryParams.startDate, primaryParams.endDate),
+        basis: 'accrual',
+        summary: {
+          outputVAT: formatScaledInteger(outputVAT),
+          inputVAT: formatScaledInteger(inputVAT),
+          netVAT: formatScaledInteger(netVAT),
+          status: this._getVatReturnStatus(netVAT),
+        },
+        breakdown: this._formatVatBreakdown(groups, taxRatesById),
+      };
+
+      if (primaryParams.includeDetails) {
+        report.details = {
+          sales: sales.details,
+          purchases: purchases.details,
+        };
+      }
+
+      return report;
     });
   }
 
@@ -641,6 +706,193 @@ class ReportService {
     });
   }
 
+  async _findVatInvoices(tenantId, params) {
+    return Invoice.find(this._buildVatDocumentFilter(tenantId, params, VAT_INVOICE_STATUSES))
+      .select('invoiceNumber customerName issueDate lineItems')
+      .sort({ issueDate: 1, invoiceNumber: 1 })
+      .lean();
+  }
+
+  async _findVatBills(tenantId, params) {
+    return Bill.find(this._buildVatDocumentFilter(tenantId, params, VAT_BILL_STATUSES))
+      .select('billNumber supplierName issueDate lineItems')
+      .sort({ issueDate: 1, billNumber: 1 })
+      .lean();
+  }
+
+  _buildVatDocumentFilter(tenantId, params, statuses) {
+    const filter = {
+      tenantId,
+      deletedAt: null,
+      status: { $in: statuses },
+      issueDate: {
+        $gte: params.startDate,
+        $lte: params.endDate,
+      },
+    };
+
+    if (params.taxRateId) {
+      filter['lineItems.taxRateId'] = toObjectId(params.taxRateId);
+    }
+
+    return filter;
+  }
+
+  _collectVatDocumentLines({
+    documents,
+    kind,
+    includeDetails,
+    taxRateId,
+    groups,
+    taxRateIds,
+  }) {
+    const details = [];
+    let taxAmount = 0n;
+
+    for (const document of documents) {
+      let documentTaxableAmount = 0n;
+      let documentTaxAmount = 0n;
+      let documentTotal = 0n;
+
+      for (const line of document.lineItems || []) {
+        const lineTaxAmount = this._toScaledMoney(line.taxAmount);
+        if (lineTaxAmount <= 0n) {
+          continue;
+        }
+
+        const lineTaxRateId = line.taxRateId?.toString?.() || null;
+        if (taxRateId && lineTaxRateId !== taxRateId) {
+          continue;
+        }
+
+        const lineTaxRate = this._toScaledMoney(line.taxRate);
+        const lineTaxableAmount = this._toScaledMoney(line.lineSubtotal);
+        const lineTotal = line.lineTotal === undefined || line.lineTotal === null
+          ? lineTaxableAmount + lineTaxAmount
+          : this._toScaledMoney(line.lineTotal);
+
+        this._addVatBreakdownLine(groups, {
+          taxRateId: lineTaxRateId,
+          taxRate: lineTaxRate,
+          kind,
+          taxAmount: lineTaxAmount,
+        });
+
+        if (lineTaxRateId) {
+          taxRateIds.add(lineTaxRateId);
+        }
+
+        documentTaxableAmount += lineTaxableAmount;
+        documentTaxAmount += lineTaxAmount;
+        documentTotal += lineTotal;
+        taxAmount += lineTaxAmount;
+      }
+
+      if (includeDetails && documentTaxAmount > 0n) {
+        details.push(this._formatVatDetail(document, kind, {
+          taxableAmount: documentTaxableAmount,
+          taxAmount: documentTaxAmount,
+          total: documentTotal,
+        }));
+      }
+    }
+
+    return { taxAmount, details };
+  }
+
+  _addVatBreakdownLine(groups, { taxRateId, taxRate, kind, taxAmount }) {
+    const key = `${taxRateId || 'manual'}:${formatScaledInteger(taxRate, 6)}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        taxRateId,
+        taxRate,
+        outputVAT: 0n,
+        inputVAT: 0n,
+      });
+    }
+
+    const group = groups.get(key);
+    if (kind === 'sales') {
+      group.outputVAT += taxAmount;
+    } else {
+      group.inputVAT += taxAmount;
+    }
+  }
+
+  async _getTaxRateNamesById(tenantId, taxRateIds) {
+    if (!taxRateIds.length) {
+      return new Map();
+    }
+
+    const taxRates = await TaxRate.find({
+      tenantId,
+      _id: { $in: taxRateIds.map((id) => toObjectId(id)) },
+    })
+      .select('name rate')
+      .lean();
+
+    return new Map(taxRates.map((taxRate) => [taxRate._id.toString(), taxRate]));
+  }
+
+  _formatVatBreakdown(groups, taxRatesById) {
+    return Array.from(groups.values())
+      .map((group) => {
+        const taxRate = group.taxRateId ? taxRatesById.get(group.taxRateId) : null;
+        const netVAT = group.outputVAT - group.inputVAT;
+
+        return {
+          taxRateId: group.taxRateId,
+          taxRateName: taxRate?.name || (group.taxRateId ? 'Unknown tax rate' : 'Manual/unknown tax rate'),
+          taxRate: formatScaledInteger(group.taxRate, 6),
+          outputVAT: formatScaledInteger(group.outputVAT),
+          inputVAT: formatScaledInteger(group.inputVAT),
+          netVAT: formatScaledInteger(netVAT),
+        };
+      })
+      .sort((left, right) => (
+        left.taxRateName.localeCompare(right.taxRateName) ||
+        left.taxRate.localeCompare(right.taxRate) ||
+        String(left.taxRateId || '').localeCompare(String(right.taxRateId || ''))
+      ));
+  }
+
+  _formatVatDetail(document, kind, totals) {
+    const base = {
+      date: toIsoString(document.issueDate),
+      taxableAmount: formatScaledInteger(totals.taxableAmount),
+      taxAmount: formatScaledInteger(totals.taxAmount),
+      total: formatScaledInteger(totals.total),
+    };
+
+    if (kind === 'sales') {
+      return {
+        invoiceId: document._id.toString(),
+        invoiceNumber: document.invoiceNumber,
+        date: base.date,
+        customerName: document.customerName || '-',
+        taxableAmount: base.taxableAmount,
+        taxAmount: base.taxAmount,
+        total: base.total,
+      };
+    }
+
+    return {
+      billId: document._id.toString(),
+      billNumber: document.billNumber,
+      date: base.date,
+      supplierName: document.supplierName || '-',
+      taxableAmount: base.taxableAmount,
+      taxAmount: base.taxAmount,
+      total: base.total,
+    };
+  }
+
+  _getVatReturnStatus(netVAT) {
+    if (netVAT > 0n) return 'payable';
+    if (netVAT < 0n) return 'refundable';
+    return 'zero';
+  }
+
   async _aggregateIncomeStatementLines(tenantId, startDate, endDate) {
     const pipeline = [
       {
@@ -895,7 +1147,14 @@ class ReportService {
   }
 
   async _getReportCacheVersion(tenantId) {
-    const [latestJournalEntry, latestAccount, latestFiscalPeriod, latestInvoice, latestBill] = await Promise.all([
+    const [
+      latestJournalEntry,
+      latestAccount,
+      latestFiscalPeriod,
+      latestInvoice,
+      latestBill,
+      latestTaxRate,
+    ] = await Promise.all([
       JournalEntry.findOne({ tenantId })
         .sort({ updatedAt: -1 })
         .select('updatedAt')
@@ -915,6 +1174,10 @@ class ReportService {
         .sort({ updatedAt: -1 })
         .select('updatedAt')
         .setOptions({ __includeDeleted: true }),
+      TaxRate.findOne({ tenantId })
+        .sort({ updatedAt: -1 })
+        .select('updatedAt')
+        .setOptions({ __includeDeleted: true }),
     ]);
 
     return [
@@ -923,6 +1186,7 @@ class ReportService {
       latestFiscalPeriod?.updatedAt?.toISOString() || 'noperiods',
       latestInvoice?.updatedAt?.toISOString() || 'noinvoices',
       latestBill?.updatedAt?.toISOString() || 'nobills',
+      latestTaxRate?.updatedAt?.toISOString() || 'notaxrates',
     ].join('|');
   }
 
@@ -984,6 +1248,31 @@ class ReportService {
 
     return {
       asOfDate,
+      refresh: Boolean(params.refresh),
+    };
+  }
+
+  _normalizeVatReturnParams(params) {
+    const startDate = this._parseRequiredDate('Start date', params.startDate, 'VAT Return', 'start');
+    const endDate = this._parseRequiredDate('End date', params.endDate, 'VAT Return', 'end');
+    this._assertDateOrder(startDate, endDate, 'VAT Return');
+
+    const basis = params.basis || 'accrual';
+    if (basis !== 'accrual') {
+      throw new BadRequestError('VAT Return basis must be accrual');
+    }
+
+    const taxRateId = params.taxRateId ? params.taxRateId.toString() : null;
+    if (taxRateId && !mongoose.Types.ObjectId.isValid(taxRateId)) {
+      throw new BadRequestError('Tax rate ID must be a valid ObjectId');
+    }
+
+    return {
+      startDate,
+      endDate,
+      includeDetails: params.includeDetails === true || params.includeDetails === 'true',
+      taxRateId,
+      basis,
       refresh: Boolean(params.refresh),
     };
   }
@@ -1128,6 +1417,10 @@ class ReportService {
       );
       return delta;
     }, {});
+  }
+
+  _toScaledMoney(value) {
+    return toScaledInteger(value?.toString?.() ?? value ?? '0');
   }
 
   _getSnapshotBalance(entry) {

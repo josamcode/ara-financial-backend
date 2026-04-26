@@ -3,6 +3,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const reportService = require('../src/modules/report/report.service');
+const accountService = require('../src/modules/account/account.service');
+const taxService = require('../src/modules/tax/tax.service');
 const fiscalPeriodService = require('../src/modules/fiscal-period/fiscalPeriod.service');
 const customerService = require('../src/modules/customer/customer.service');
 const supplierService = require('../src/modules/supplier/supplier.service');
@@ -35,6 +37,22 @@ test.after(async () => {
   await closeDatabase();
 });
 
+async function createInputVatAccount(fixture) {
+  return accountService.createAccount(
+    fixture.tenant._id,
+    {
+      code: '1150',
+      nameAr: 'Input VAT',
+      nameEn: 'Input VAT',
+      type: 'asset',
+    },
+    {
+      userId: fixture.user._id,
+      auditContext: fixture.auditContext,
+    }
+  );
+}
+
 test('report routes return validation 4xx responses for missing required params', async () => {
   const fixture = await createTenantFixture({ fiscalYear: 2026 });
   tenantIds.add(fixture.tenant._id);
@@ -51,6 +69,315 @@ test('report routes return validation 4xx responses for missing required params'
   assert.equal(response.status, 422);
   assert.equal(body.success, false);
   assert.equal(body.error.code, 'VALIDATION_ERROR');
+});
+
+test('vat return report aggregates tenant-scoped output and input VAT', async () => {
+  const fixture = await createTenantFixture({ fiscalYear: 2026 });
+  const otherFixture = await createTenantFixture({ fiscalYear: 2026 });
+  tenantIds.add(fixture.tenant._id);
+  tenantIds.add(otherFixture.tenant._id);
+
+  await createInputVatAccount(fixture);
+  await createInputVatAccount(otherFixture);
+
+  const accounts = await getAccountsByCode(fixture.tenant._id, ['1120', '4100', '2110', '5200']);
+  const otherAccounts = await getAccountsByCode(otherFixture.tenant._id, ['1120', '4100', '2110', '5200']);
+  const taxRate = await taxService.createTaxRate(
+    fixture.tenant._id,
+    fixture.user._id,
+    { name: 'VAT 15%', code: 'VAT15RPT', rate: '15', type: 'both' }
+  );
+  const otherTaxRate = await taxService.createTaxRate(
+    otherFixture.tenant._id,
+    otherFixture.user._id,
+    { name: 'VAT 15%', code: 'VAT15RPT', rate: '15', type: 'both' }
+  );
+
+  async function createTaxedInvoice(targetFixture, targetAccounts, targetTaxRate, {
+    amount,
+    issueDate,
+    dueDate = '2026-04-30',
+    customerName = 'VAT Customer',
+    finalStatus = 'sent',
+  }) {
+    const invoice = await invoiceService.createInvoice(
+      targetFixture.tenant._id,
+      targetFixture.user._id,
+      {
+        customerName,
+        issueDate,
+        dueDate,
+        currency: 'EGP',
+        lineItems: [{
+          description: 'Taxed sale',
+          quantity: '1',
+          unitPrice: amount,
+          taxRateId: targetTaxRate._id.toString(),
+          lineTotal: amount,
+        }],
+        subtotal: amount,
+        total: amount,
+        notes: '',
+      },
+      { auditContext: targetFixture.auditContext }
+    );
+
+    if (finalStatus === 'draft') {
+      return invoice;
+    }
+
+    await invoiceService.markAsSent(
+      invoice._id,
+      targetFixture.tenant._id,
+      targetFixture.user._id,
+      {
+        arAccountId: targetAccounts.get('1120')._id.toString(),
+        revenueAccountId: targetAccounts.get('4100')._id.toString(),
+      },
+      { auditContext: targetFixture.auditContext }
+    );
+
+    if (finalStatus === 'cancelled') {
+      return invoiceService.cancelInvoice(
+        invoice._id,
+        targetFixture.tenant._id,
+        targetFixture.user._id,
+        { auditContext: targetFixture.auditContext }
+      );
+    }
+
+    return invoiceService.getInvoiceById(invoice._id, targetFixture.tenant._id);
+  }
+
+  async function createTaxedBill(targetFixture, targetAccounts, targetTaxRate, {
+    amount,
+    issueDate,
+    dueDate = '2026-04-30',
+    supplierName = 'VAT Supplier',
+    finalStatus = 'posted',
+  }) {
+    const bill = await billService.createBill(
+      targetFixture.tenant._id,
+      targetFixture.user._id,
+      {
+        supplierName,
+        issueDate,
+        dueDate,
+        currency: 'EGP',
+        lineItems: [{
+          description: 'Taxed purchase',
+          quantity: '1',
+          unitPrice: amount,
+          taxRateId: targetTaxRate._id.toString(),
+          lineTotal: amount,
+        }],
+        subtotal: amount,
+        total: amount,
+        notes: '',
+      },
+      { auditContext: targetFixture.auditContext }
+    );
+
+    if (finalStatus === 'draft') {
+      return bill;
+    }
+
+    await billService.postBill(
+      bill._id,
+      targetFixture.tenant._id,
+      targetFixture.user._id,
+      {
+        apAccountId: targetAccounts.get('2110')._id.toString(),
+        debitAccountId: targetAccounts.get('5200')._id.toString(),
+      },
+      { auditContext: targetFixture.auditContext }
+    );
+
+    if (finalStatus === 'cancelled') {
+      return billService.cancelBill(
+        bill._id,
+        targetFixture.tenant._id,
+        targetFixture.user._id,
+        { auditContext: targetFixture.auditContext }
+      );
+    }
+
+    return billService.getBillById(bill._id, targetFixture.tenant._id);
+  }
+
+  const includedInvoice = await createTaxedInvoice(fixture, accounts, taxRate, {
+    amount: '100',
+    issueDate: '2026-04-10',
+    customerName: 'Included Customer',
+  });
+  await createTaxedInvoice(fixture, accounts, taxRate, {
+    amount: '50',
+    issueDate: '2026-04-11',
+    finalStatus: 'draft',
+  });
+  await createTaxedInvoice(fixture, accounts, taxRate, {
+    amount: '80',
+    issueDate: '2026-04-12',
+    finalStatus: 'cancelled',
+  });
+  await createTaxedInvoice(fixture, accounts, taxRate, {
+    amount: '200',
+    issueDate: '2026-05-01',
+  });
+  await createTaxedInvoice(otherFixture, otherAccounts, otherTaxRate, {
+    amount: '999',
+    issueDate: '2026-04-10',
+  });
+
+  const noTaxInvoice = await invoiceService.createInvoice(
+    fixture.tenant._id,
+    fixture.user._id,
+    {
+      customerName: 'No Tax Customer',
+      issueDate: '2026-04-13',
+      dueDate: '2026-04-30',
+      currency: 'EGP',
+      lineItems: [{
+        description: 'No tax sale',
+        quantity: '1',
+        unitPrice: '25',
+        lineTotal: '25',
+      }],
+      subtotal: '25',
+      total: '25',
+      notes: '',
+    },
+    { auditContext: fixture.auditContext }
+  );
+  await invoiceService.markAsSent(
+    noTaxInvoice._id,
+    fixture.tenant._id,
+    fixture.user._id,
+    {
+      arAccountId: accounts.get('1120')._id.toString(),
+      revenueAccountId: accounts.get('4100')._id.toString(),
+    },
+    { auditContext: fixture.auditContext }
+  );
+
+  const includedBill = await createTaxedBill(fixture, accounts, taxRate, {
+    amount: '40',
+    issueDate: '2026-04-14',
+    supplierName: 'Included Supplier',
+  });
+  await createTaxedBill(fixture, accounts, taxRate, {
+    amount: '20',
+    issueDate: '2026-04-15',
+    finalStatus: 'draft',
+  });
+  await createTaxedBill(fixture, accounts, taxRate, {
+    amount: '70',
+    issueDate: '2026-04-16',
+    finalStatus: 'cancelled',
+  });
+  await createTaxedBill(fixture, accounts, taxRate, {
+    amount: '60',
+    issueDate: '2026-03-31',
+  });
+  await createTaxedBill(otherFixture, otherAccounts, otherTaxRate, {
+    amount: '888',
+    issueDate: '2026-04-14',
+  });
+
+  const noTaxBill = await billService.createBill(
+    fixture.tenant._id,
+    fixture.user._id,
+    {
+      supplierName: 'No Tax Supplier',
+      issueDate: '2026-04-17',
+      dueDate: '2026-04-30',
+      currency: 'EGP',
+      lineItems: [{
+        description: 'No tax purchase',
+        quantity: '1',
+        unitPrice: '30',
+        lineTotal: '30',
+      }],
+      subtotal: '30',
+      total: '30',
+      notes: '',
+    },
+    { auditContext: fixture.auditContext }
+  );
+  await billService.postBill(
+    noTaxBill._id,
+    fixture.tenant._id,
+    fixture.user._id,
+    {
+      apAccountId: accounts.get('2110')._id.toString(),
+      debitAccountId: accounts.get('5200')._id.toString(),
+    },
+    { auditContext: fixture.auditContext }
+  );
+
+  const { response, body } = await fetchJson(
+    `${serverContext.baseUrl}/api/v1/reports/vat-return?startDate=2026-04-01&endDate=2026-04-30&includeDetails=true`,
+    {
+      headers: {
+        Authorization: `Bearer ${fixture.accessToken}`,
+      },
+    }
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(body.success, true);
+  assert.deepEqual(body.data.summary, {
+    outputVAT: '15',
+    inputVAT: '6',
+    netVAT: '9',
+    status: 'payable',
+  });
+  assert.equal(body.data.basis, 'accrual');
+  assert.match(body.data.period.startDate, /^2026-04-01T00:00:00\.000Z$/);
+  assert.match(body.data.period.endDate, /^2026-04-30T23:59:59\.999Z$/);
+  assert.equal(body.data.breakdown.length, 1);
+  assert.deepEqual(body.data.breakdown[0], {
+    taxRateId: taxRate._id.toString(),
+    taxRateName: 'VAT 15%',
+    taxRate: '15',
+    outputVAT: '15',
+    inputVAT: '6',
+    netVAT: '9',
+  });
+  assert.equal(body.data.details.sales.length, 1);
+  assert.equal(body.data.details.sales[0].invoiceId, includedInvoice._id.toString());
+  assert.equal(body.data.details.sales[0].invoiceNumber, includedInvoice.invoiceNumber);
+  assert.equal(body.data.details.sales[0].customerName, 'Included Customer');
+  assert.equal(body.data.details.sales[0].taxableAmount, '100');
+  assert.equal(body.data.details.sales[0].taxAmount, '15');
+  assert.equal(body.data.details.sales[0].total, '115');
+  assert.equal(body.data.details.purchases.length, 1);
+  assert.equal(body.data.details.purchases[0].billId, includedBill._id.toString());
+  assert.equal(body.data.details.purchases[0].billNumber, includedBill.billNumber);
+  assert.equal(body.data.details.purchases[0].supplierName, 'Included Supplier');
+  assert.equal(body.data.details.purchases[0].taxableAmount, '40');
+  assert.equal(body.data.details.purchases[0].taxAmount, '6');
+  assert.equal(body.data.details.purchases[0].total, '46');
+
+  const filteredReport = await reportService.getVatReturn(fixture.tenant._id, {
+    startDate: '2026-04-01',
+    endDate: '2026-04-30',
+    taxRateId: taxRate._id.toString(),
+    refresh: true,
+  });
+  assert.equal(filteredReport.summary.netVAT, '9');
+  assert.equal(filteredReport.breakdown[0].taxRateId, taxRate._id.toString());
+
+  const noDetailsResult = await fetchJson(
+    `${serverContext.baseUrl}/api/v1/reports/vat-return?startDate=2026-04-01&endDate=2026-04-30`,
+    {
+      headers: {
+        Authorization: `Bearer ${fixture.accessToken}`,
+      },
+    }
+  );
+  assert.equal(noDetailsResult.response.status, 200);
+  assert.equal(Object.prototype.hasOwnProperty.call(noDetailsResult.body.data, 'details'), false);
 });
 
 test('balance sheet current-year earnings are limited to the fiscal year containing the as-of date', async () => {

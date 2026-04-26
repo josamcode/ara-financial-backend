@@ -24,7 +24,21 @@ const refreshSchema = z.preprocess((value) => {
   return value;
 }, z.boolean().optional().default(false));
 
+const booleanQuerySchema = z.preprocess((value) => {
+  if (value === undefined) return undefined;
+  if (typeof value === 'boolean') return value;
+
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true') return true;
+    if (normalized === 'false') return false;
+  }
+
+  return value;
+}, z.boolean().optional().default(false));
+
 const exportFormatSchema = z.enum(['csv', 'excel', 'pdf']).optional().default('csv');
+const objectIdPattern = /^[0-9a-fA-F]{24}$/;
 
 function validateDateOrder(data, ctx, startKey, endKey, messagePrefix) {
   const start = data[startKey];
@@ -108,6 +122,17 @@ const apAgingQuerySchema = z.object({
   refresh: refreshSchema,
 }).strict();
 
+const vatReturnQuerySchema = z.object({
+  startDate: isoDateSchema,
+  endDate: isoDateSchema,
+  includeDetails: booleanQuerySchema,
+  taxRateId: z.string().regex(objectIdPattern, 'Tax rate ID must be a valid ObjectId').optional(),
+  basis: z.literal('accrual').optional().default('accrual'),
+  refresh: refreshSchema,
+}).strict().superRefine((data, ctx) => {
+  validateDateOrder(data, ctx, 'startDate', 'endDate', 'VAT Return');
+});
+
 const trialBalanceExportQuerySchema = trialBalanceQuerySchema.extend({
   format: exportFormatSchema,
 }).strict();
@@ -131,6 +156,7 @@ module.exports = {
   cashFlowQuerySchema,
   arAgingQuerySchema,
   apAgingQuerySchema,
+  vatReturnQuerySchema,
   trialBalanceExportQuerySchema,
   incomeStatementExportQuerySchema,
   balanceSheetExportQuerySchema,
