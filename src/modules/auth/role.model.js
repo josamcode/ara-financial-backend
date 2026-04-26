@@ -57,6 +57,10 @@ const PERMISSIONS = {
   BILLING_READ: 'billing:read',
   BILLING_MANAGE: 'billing:manage',
 
+  // Tax permissions
+  TAX_READ: 'tax:read',
+  TAX_MANAGE: 'tax:manage',
+
   // Customer permissions
   CUSTOMER_READ: 'customer:read',
   CUSTOMER_CREATE: 'customer:create',
@@ -126,6 +130,8 @@ const DEFAULT_ROLES = {
       PERMISSIONS.SUPPLIER_UPDATE,
       PERMISSIONS.BILL_READ,
       PERMISSIONS.BILL_CREATE,
+      PERMISSIONS.TAX_READ,
+      PERMISSIONS.TAX_MANAGE,
     ],
     isSystem: true,
   },

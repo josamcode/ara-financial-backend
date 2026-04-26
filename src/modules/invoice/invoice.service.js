@@ -6,6 +6,7 @@ const InvoiceCounter = require('./invoiceCounter.model');
 const { Customer } = require('../customer/customer.model');
 const Tenant = require('../tenant/tenant.model');
 const journalService = require('../journal/journal.service');
+const taxService = require('../tax/tax.service');
 const auditService = require('../audit/audit.service');
 const billingLimitsService = require('../billing/billing-limits.service');
 const { sendEmail } = require('../../common/utils/email');
@@ -32,7 +33,7 @@ class InvoiceService {
       customerEmail = customer.email || customerEmail || '';
     }
 
-    const draftInvoice = this._normalizeDraftInvoiceInput({
+    const draftInvoice = await this._calculateDraftInvoice(tenantId, this._normalizeDraftInvoiceInput({
       customerId,
       customerName,
       customerEmail,
@@ -41,9 +42,10 @@ class InvoiceService {
       currency: data.currency,
       lineItems: data.lineItems,
       subtotal: data.subtotal,
+      taxTotal: data.taxTotal,
       total: data.total,
       notes: data.notes,
-    });
+    }));
     this._assertValidDraftInvoice(draftInvoice);
 
     const invoice = await Invoice.create({
@@ -57,6 +59,7 @@ class InvoiceService {
       currency: draftInvoice.currency,
       lineItems: this._buildLineItems(draftInvoice.lineItems),
       subtotal: mongoose.Types.Decimal128.fromString(draftInvoice.subtotal),
+      taxTotal: mongoose.Types.Decimal128.fromString(draftInvoice.taxTotal),
       total: mongoose.Types.Decimal128.fromString(draftInvoice.total),
       paidAmount: 0,
       remainingAmount: Number(draftInvoice.total),
@@ -174,7 +177,7 @@ class InvoiceService {
       if (data.customerEmail !== undefined) customerEmail = data.customerEmail;
     }
 
-    const draftInvoice = this._normalizeDraftInvoiceInput({
+    const draftInvoice = await this._calculateDraftInvoice(tenantId, this._normalizeDraftInvoiceInput({
       customerId,
       customerName,
       customerEmail,
@@ -183,9 +186,10 @@ class InvoiceService {
       currency: data.currency ?? invoice.currency,
       lineItems: data.lineItems ?? this._serializeLineItems(invoice.lineItems),
       subtotal: data.subtotal ?? invoice.subtotal,
+      taxTotal: data.taxTotal ?? invoice.taxTotal,
       total: data.total ?? invoice.total,
       notes: data.notes !== undefined ? data.notes : invoice.notes,
-    });
+    }));
     this._assertValidDraftInvoice(draftInvoice);
 
     invoice.customerId = draftInvoice.customerId || null;
@@ -197,6 +201,7 @@ class InvoiceService {
     invoice.notes = draftInvoice.notes;
     invoice.lineItems = this._buildLineItems(draftInvoice.lineItems);
     invoice.subtotal = mongoose.Types.Decimal128.fromString(draftInvoice.subtotal);
+    invoice.taxTotal = mongoose.Types.Decimal128.fromString(draftInvoice.taxTotal);
     invoice.total = mongoose.Types.Decimal128.fromString(draftInvoice.total);
     invoice.paidAmount = 0;
     invoice.remainingAmount = Number(draftInvoice.total);
@@ -236,12 +241,30 @@ class InvoiceService {
       currency: invoice.currency,
       lineItems: this._serializeLineItems(invoice.lineItems),
       subtotal: invoice.subtotal,
+      taxTotal: invoice.taxTotal,
       total: invoice.total,
       notes: invoice.notes,
     }));
 
+    const subtotalStr = invoice.subtotal.toString();
+    const taxTotalStr = invoice.taxTotal?.toString?.() ?? '0';
     const totalStr = invoice.total.toString();
     const sendDescription = `إرسال فاتورة - ${invoice.invoiceNumber}`;
+
+    const lines = [
+      { accountId: arAccountId, debit: totalStr, credit: '0', description: sendDescription },
+      { accountId: revenueAccountId, debit: '0', credit: subtotalStr, description: sendDescription },
+    ];
+
+    if (toScaledInteger(taxTotalStr) > 0n) {
+      const outputVatAccount = await taxService.resolveOutputVatAccount(tenantId);
+      lines.push({
+        accountId: outputVatAccount._id.toString(),
+        debit: '0',
+        credit: taxTotalStr,
+        description: 'Output VAT',
+      });
+    }
 
     // Create journal entry (draft then post)
     const entry = await journalService.createEntry(
@@ -252,7 +275,7 @@ class InvoiceService {
         description: `فاتورة رقم ${invoice.invoiceNumber} - ${invoice.customerName}`,
         description: sendDescription,
         reference: invoice.invoiceNumber,
-        lines: [
+        lines: lines.length ? lines : [
           { accountId: arAccountId, debit: totalStr, credit: '0', description: 'ذمم مدينة' },
           { accountId: revenueAccountId, debit: '0', credit: totalStr, description: 'إيراد' },
         ].map((line) => ({ ...line, description: sendDescription })),
@@ -461,6 +484,10 @@ class InvoiceService {
       description: item.description,
       quantity: mongoose.Types.Decimal128.fromString(this._moneyToString(item.quantity)),
       unitPrice: mongoose.Types.Decimal128.fromString(this._moneyToString(item.unitPrice)),
+      lineSubtotal: mongoose.Types.Decimal128.fromString(this._moneyToString(item.lineSubtotal)),
+      taxRateId: item.taxRateId || null,
+      taxRate: mongoose.Types.Decimal128.fromString(this._moneyToString(item.taxRate || '0')),
+      taxAmount: mongoose.Types.Decimal128.fromString(this._moneyToString(item.taxAmount || '0')),
       lineTotal: mongoose.Types.Decimal128.fromString(this._moneyToString(item.lineTotal)),
     }));
   }
@@ -470,6 +497,10 @@ class InvoiceService {
       description: item.description,
       quantity: this._moneyToString(item.quantity),
       unitPrice: this._moneyToString(item.unitPrice),
+      lineSubtotal: this._moneyToString(item.lineSubtotal || item.lineTotal),
+      taxRateId: item.taxRateId?.toString?.() || null,
+      taxRate: this._moneyToString(item.taxRate || '0'),
+      taxAmount: this._moneyToString(item.taxAmount || '0'),
       lineTotal: this._moneyToString(item.lineTotal),
     }));
   }
@@ -487,12 +518,34 @@ class InvoiceService {
           description: item.description,
           quantity: this._moneyToString(item.quantity),
           unitPrice: this._moneyToString(item.unitPrice),
+          lineSubtotal: this._moneyToString(item.lineSubtotal || item.lineTotal),
+          taxRateId: this._normalizeOptionalObjectId(item.taxRateId, 'Tax rate ID'),
+          taxRate: this._moneyToString(item.taxRate || '0'),
+          taxAmount: this._moneyToString(item.taxAmount || '0'),
           lineTotal: this._moneyToString(item.lineTotal),
         }))
         : [],
       subtotal: this._moneyToString(data.subtotal),
+      taxTotal: this._moneyToString(data.taxTotal || '0'),
       total: this._moneyToString(data.total),
       notes: data.notes || '',
+    };
+  }
+
+  async _calculateDraftInvoice(tenantId, invoice) {
+    const taxRatesById = await taxService.getTaxRatesForLines(
+      tenantId,
+      invoice.lineItems,
+      ['sales', 'both']
+    );
+    const calculated = taxService.calculateLinesTax(invoice.lineItems, taxRatesById);
+
+    return {
+      ...invoice,
+      lineItems: calculated.lineItems,
+      subtotal: calculated.subtotal,
+      taxTotal: calculated.taxTotal,
+      total: calculated.total,
     };
   }
 
@@ -502,13 +555,25 @@ class InvoiceService {
     }
 
     const subtotal = this._parseMoney(invoice.subtotal, 'Invoice subtotal');
+    const taxTotal = this._parseMoney(invoice.taxTotal || '0', 'Invoice tax total');
     const total = this._parseMoney(invoice.total, 'Invoice total');
     let subtotalFromLines = 0n;
+    let taxTotalFromLines = 0n;
+    let totalFromLines = 0n;
 
     invoice.lineItems.forEach((item, index) => {
       const lineNumber = index + 1;
       const quantity = this._parseMoney(item.quantity, `Invoice line ${lineNumber} quantity`);
       const unitPrice = this._parseMoney(item.unitPrice, `Invoice line ${lineNumber} unit price`);
+      const lineSubtotal = this._parseMoney(
+        item.lineSubtotal,
+        `Invoice line ${lineNumber} line subtotal`
+      );
+      const taxRate = this._parseMoney(item.taxRate || '0', `Invoice line ${lineNumber} tax rate`);
+      const taxAmount = this._parseMoney(
+        item.taxAmount || '0',
+        `Invoice line ${lineNumber} tax amount`
+      );
       const lineTotal = this._parseMoney(item.lineTotal, `Invoice line ${lineNumber} line total`);
 
       if (quantity <= 0n) {
@@ -517,31 +582,53 @@ class InvoiceService {
       if (unitPrice < 0n) {
         throw new BadRequestError(`Invoice line ${lineNumber} unit price cannot be negative`);
       }
+      if (lineSubtotal < 0n) {
+        throw new BadRequestError(`Invoice line ${lineNumber} line subtotal cannot be negative`);
+      }
+      if (taxRate < 0n || taxRate > 100n * MONEY_FACTOR) {
+        throw new BadRequestError(`Invoice line ${lineNumber} tax rate must be between 0 and 100`);
+      }
+      if (taxAmount < 0n) {
+        throw new BadRequestError(`Invoice line ${lineNumber} tax amount cannot be negative`);
+      }
       if (lineTotal < 0n) {
         throw new BadRequestError(`Invoice line ${lineNumber} line total cannot be negative`);
       }
 
-      const expectedLineTotal = ((quantity * unitPrice) + (MONEY_FACTOR / 2n)) / MONEY_FACTOR;
-      if (lineTotal !== expectedLineTotal) {
+      const expectedLineSubtotal = ((quantity * unitPrice) + (MONEY_FACTOR / 2n)) / MONEY_FACTOR;
+      if (lineSubtotal !== expectedLineSubtotal) {
         throw new BadRequestError(
-          `Invoice line ${lineNumber} line total must equal quantity x unit price`
+          `Invoice line ${lineNumber} line subtotal must equal quantity x unit price`
+        );
+      }
+      if (lineTotal !== lineSubtotal + taxAmount) {
+        throw new BadRequestError(
+          `Invoice line ${lineNumber} line total must equal line subtotal plus tax amount`
         );
       }
 
-      subtotalFromLines += lineTotal;
+      subtotalFromLines += lineSubtotal;
+      taxTotalFromLines += taxAmount;
+      totalFromLines += lineTotal;
     });
 
     if (subtotal <= 0n) {
       throw new BadRequestError('Invoice subtotal must be greater than zero');
     }
+    if (taxTotal < 0n) {
+      throw new BadRequestError('Invoice tax total cannot be negative');
+    }
     if (total <= 0n) {
       throw new BadRequestError('Invoice total must be greater than zero');
     }
     if (subtotal !== subtotalFromLines) {
-      throw new BadRequestError('Invoice subtotal must equal the sum of line totals');
+      throw new BadRequestError('Invoice subtotal must equal the sum of line subtotals');
     }
-    if (total !== subtotal) {
-      throw new BadRequestError('Invoice total must equal subtotal');
+    if (taxTotal !== taxTotalFromLines) {
+      throw new BadRequestError('Invoice tax total must equal the sum of line tax amounts');
+    }
+    if (total !== totalFromLines || total !== subtotal + taxTotal) {
+      throw new BadRequestError('Invoice total must equal subtotal plus tax total');
     }
   }
 

@@ -13,6 +13,7 @@ const User = require('../../src/modules/user/user.model');
 const Tenant = require('../../src/modules/tenant/tenant.model');
 const { Role } = require('../../src/modules/auth/role.model');
 const { Account } = require('../../src/modules/account/account.model');
+const { TaxRate } = require('../../src/modules/tax/tax-rate.model');
 const { Plan } = require('../../src/modules/billing/plan.model');
 const { TenantSubscription } = require('../../src/modules/billing/tenant-subscription.model');
 const { JournalEntry } = require('../../src/modules/journal/journal.model');
@@ -47,6 +48,7 @@ async function closeDatabase() {
 
 async function cleanupTenantData(tenantIds) {
   for (const tenantId of tenantIds) {
+    await TaxRate.deleteMany({ tenantId });
     await JournalEntry.deleteMany({ tenantId });
     await Account.deleteMany({ tenantId });
     await FiscalPeriod.deleteMany({ tenantId });

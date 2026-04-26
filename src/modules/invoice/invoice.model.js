@@ -17,6 +17,23 @@ const lineItemSchema = new mongoose.Schema(
     description: { type: String, required: true, trim: true, maxlength: 500 },
     quantity: { type: mongoose.Schema.Types.Decimal128, required: true },
     unitPrice: { type: mongoose.Schema.Types.Decimal128, required: true },
+    lineSubtotal: {
+      type: mongoose.Schema.Types.Decimal128,
+      default: mongoose.Types.Decimal128.fromString('0'),
+    },
+    taxRateId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'TaxRate',
+      default: null,
+    },
+    taxRate: {
+      type: mongoose.Schema.Types.Decimal128,
+      default: mongoose.Types.Decimal128.fromString('0'),
+    },
+    taxAmount: {
+      type: mongoose.Schema.Types.Decimal128,
+      default: mongoose.Types.Decimal128.fromString('0'),
+    },
     lineTotal: { type: mongoose.Schema.Types.Decimal128, required: true },
   },
   { _id: true }
@@ -52,6 +69,10 @@ const invoiceSchema = new mongoose.Schema(
     currency: { type: String, default: 'EGP', maxlength: 10 },
     lineItems: { type: [lineItemSchema], default: [] },
     subtotal: { type: mongoose.Schema.Types.Decimal128, required: true },
+    taxTotal: {
+      type: mongoose.Schema.Types.Decimal128,
+      default: mongoose.Types.Decimal128.fromString('0'),
+    },
     total: { type: mongoose.Schema.Types.Decimal128, required: true },
     paidAmount: { type: Number, default: 0 },
     remainingAmount: {
@@ -91,6 +112,7 @@ const invoiceSchema = new mongoose.Schema(
       transform(_doc, ret) {
         const dec = (v) => (v ? v.toString() : '0');
         ret.subtotal = dec(ret.subtotal);
+        ret.taxTotal = dec(ret.taxTotal);
         ret.total = dec(ret.total);
         const totalAmount = resolveInvoiceTotalAmount(ret);
         ret.paidAmount = resolveInvoicePaidAmount(ret, totalAmount);
@@ -102,6 +124,9 @@ const invoiceSchema = new mongoose.Schema(
             ...item,
             quantity: dec(item.quantity),
             unitPrice: dec(item.unitPrice),
+            lineSubtotal: dec(item.lineSubtotal || item.lineTotal),
+            taxRate: dec(item.taxRate),
+            taxAmount: dec(item.taxAmount),
             lineTotal: dec(item.lineTotal),
           }));
         }

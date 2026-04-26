@@ -28,6 +28,10 @@ const lineItemSchema = z.object({
   description: z.string().min(1).max(500),
   quantity: positiveMonetaryAmount,
   unitPrice: nonNegativeMonetaryAmount,
+  lineSubtotal: nonNegativeMonetaryAmount.optional(),
+  taxRateId: z.union([objectId, z.literal('')]).optional().nullable(),
+  taxRate: nonNegativeMonetaryAmount.optional(),
+  taxAmount: nonNegativeMonetaryAmount.optional(),
   lineTotal: nonNegativeMonetaryAmount,
 });
 
@@ -36,6 +40,14 @@ function toLineTotal(quantity, unitPrice) {
 }
 
 function validateBillAmounts(payload, ctx) {
+  const hasTaxInputs = payload.lineItems.some((item) => (
+    item.taxRateId || item.taxRate || item.taxAmount || item.lineSubtotal
+  )) || payload.taxTotal;
+
+  if (hasTaxInputs) {
+    return;
+  }
+
   let subtotalFromLines = 0n;
 
   payload.lineItems.forEach((item, index) => {
@@ -100,6 +112,7 @@ const createBillSchema = z.object({
   currency: z.string().max(10).optional().default('EGP'),
   lineItems: z.array(lineItemSchema).min(1, 'At least one line item required'),
   subtotal: nonNegativeMonetaryAmount,
+  taxTotal: nonNegativeMonetaryAmount.optional().default('0'),
   total: nonNegativeMonetaryAmount,
   notes: z.string().max(2000).optional().default(''),
 }).superRefine(validateBillAmounts);
