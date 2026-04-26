@@ -15,6 +15,7 @@ const { NotFoundError } = require('../../common/errors');
 const { buildPaginationMeta } = require('../../common/utils/response');
 
 const BILL_STATEMENT_STATUSES = ['posted', ...PAYABLE_BILL_STATUSES, 'paid'];
+const FOREIGN_CURRENCY_BALANCES_WARNING = 'FOREIGN_CURRENCY_BALANCES_UNSUPPORTED';
 
 class SupplierService {
   async listSuppliers(tenantId, { limit = 20, skip = 0, search } = {}) {
@@ -52,6 +53,7 @@ class SupplierService {
     let totalPaid = 0;
     let outstandingBalance = 0;
     const detailedBills = [];
+    const foreignDocuments = [];
 
     for (const bill of bills) {
       const status = resolveBillStatus(bill);
@@ -70,6 +72,10 @@ class SupplierService {
       if (!BILL_STATEMENT_STATUSES.includes(status)) {
         continue;
       }
+      if (this._isForeignCurrencyDocument(bill)) {
+        foreignDocuments.push(this._formatUnsupportedForeignDocument(bill));
+        continue;
+      }
 
       totalBilled = roundMonetaryAmount(totalBilled + amount);
       totalPaid = roundMonetaryAmount(totalPaid + paidAmount);
@@ -83,7 +89,11 @@ class SupplierService {
         totalBilled,
         totalPaid,
         outstandingBalance,
+        currency: this._getSummaryBaseCurrency(bills),
+        amountsIn: 'baseCurrency',
+        excludedForeignDocumentsCount: foreignDocuments.length,
       },
+      warnings: this._buildForeignCurrencyBalanceWarnings('Supplier bill summary', foreignDocuments),
     };
   }
 
@@ -99,10 +109,15 @@ class SupplierService {
     let totalPaid = 0;
     let outstandingBalance = 0;
     const entries = [];
+    const foreignDocuments = [];
 
     for (const bill of bills) {
       const billStatus = resolveBillStatus(bill);
       if (!BILL_STATEMENT_STATUSES.includes(billStatus)) {
+        continue;
+      }
+      if (this._isForeignCurrencyDocument(bill)) {
+        foreignDocuments.push(this._formatUnsupportedForeignDocument(bill));
         continue;
       }
 
@@ -123,7 +138,8 @@ class SupplierService {
         credit: amount,
         billId: bill._id,
         journalEntryId: bill.postedJournalEntryId || null,
-        currency: bill.currency || 'EGP',
+        currency: this._getDocumentBaseCurrency(bill),
+        documentCurrency: this._getDocumentCurrency(bill),
         _sortDate: new Date(bill.issueDate).getTime(),
         _sortPriority: 0,
         _sortKey: `${bill.billNumber}:${bill._id}`,
@@ -145,7 +161,8 @@ class SupplierService {
             credit: 0,
             billId: bill._id,
             journalEntryId: payment.journalEntryId || null,
-            currency: bill.currency || 'EGP',
+            currency: this._getDocumentBaseCurrency(bill),
+            documentCurrency: this._getDocumentCurrency(bill),
             _sortDate: new Date(payment.date).getTime(),
             _sortPriority: 1,
             _sortKey: `${bill.billNumber}:${index}`,
@@ -180,9 +197,13 @@ class SupplierService {
         totalBilled,
         totalPaid,
         outstandingBalance,
+        currency: this._getSummaryBaseCurrency(bills),
+        amountsIn: 'baseCurrency',
+        excludedForeignDocumentsCount: foreignDocuments.length,
       },
       transactions: paginatedTransactions,
       pagination,
+      warnings: this._buildForeignCurrencyBalanceWarnings('Supplier statement', foreignDocuments),
     };
   }
 
@@ -249,6 +270,54 @@ class SupplierService {
       newValues: { name: supplier.name },
       auditContext: options.auditContext,
     });
+  }
+
+  _normalizeCurrencyCode(value, fallback = 'SAR') {
+    const normalized = value?.toString?.().trim().toUpperCase();
+    return /^[A-Z]{3}$/.test(normalized || '') ? normalized : fallback;
+  }
+
+  _getDocumentBaseCurrency(bill, fallbackBaseCurrency = 'SAR') {
+    return this._normalizeCurrencyCode(bill?.baseCurrency, fallbackBaseCurrency);
+  }
+
+  _getDocumentCurrency(bill, fallbackBaseCurrency = 'SAR') {
+    const baseCurrency = this._getDocumentBaseCurrency(bill, fallbackBaseCurrency);
+    return this._normalizeCurrencyCode(
+      bill?.documentCurrency || bill?.currency || baseCurrency,
+      baseCurrency
+    );
+  }
+
+  _isForeignCurrencyDocument(bill) {
+    const baseCurrency = this._getDocumentBaseCurrency(bill);
+    const documentCurrency = this._getDocumentCurrency(bill, baseCurrency);
+    return documentCurrency !== baseCurrency;
+  }
+
+  _getSummaryBaseCurrency(bills) {
+    const bill = bills.find((item) => item?.baseCurrency);
+    return this._getDocumentBaseCurrency(bill || null);
+  }
+
+  _formatUnsupportedForeignDocument(bill) {
+    return {
+      billId: bill._id?.toString?.() ?? bill._id,
+      billNumber: bill.billNumber || null,
+      documentCurrency: this._getDocumentCurrency(bill),
+      baseCurrency: this._getDocumentBaseCurrency(bill),
+    };
+  }
+
+  _buildForeignCurrencyBalanceWarnings(context, documents) {
+    if (!documents.length) return [];
+
+    return [{
+      code: FOREIGN_CURRENCY_BALANCES_WARNING,
+      message: `${context} excludes foreign-currency documents because base paid amounts and FX gain/loss handling are not supported in this version`,
+      count: documents.length,
+      documents,
+    }];
   }
 }
 

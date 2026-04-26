@@ -341,6 +341,12 @@ class BillService {
   async recordPayment(billId, tenantId, userId, { cashAccountId, amount, paymentDate }, options = {}) {
     const bill = await Bill.findOne({ _id: billId, tenantId });
     if (!bill) throw new NotFoundError('Bill not found');
+    if (this._isForeignCurrencyDocument(bill)) {
+      throw new BadRequestError(
+        'Foreign-currency payments require FX gain/loss handling and are not supported in this version',
+        'FOREIGN_CURRENCY_PAYMENT_UNSUPPORTED'
+      );
+    }
     if (!PAYABLE_BILL_STATUSES.includes(bill.status)) {
       throw new BadRequestError('Only posted, overdue, or partially paid bills can be paid');
     }
@@ -602,6 +608,15 @@ class BillService {
 
   _normalizePostingCurrency(value) {
     return this._moneyToString(value).toUpperCase();
+  }
+
+  _isForeignCurrencyDocument(bill) {
+    const baseCurrency = this._normalizePostingCurrency(bill.baseCurrency || 'SAR');
+    const documentCurrency = this._normalizePostingCurrency(
+      bill.documentCurrency || bill.currency || baseCurrency
+    );
+
+    return documentCurrency !== baseCurrency;
   }
 
   async _calculateDraftBill(tenantId, bill) {

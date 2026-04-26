@@ -8,6 +8,8 @@ const exchangeRateService = require('../src/modules/exchange-rate/exchange-rate.
 const taxService = require('../src/modules/tax/tax.service');
 const invoiceService = require('../src/modules/invoice/invoice.service');
 const billService = require('../src/modules/bill/bill.service');
+const customerService = require('../src/modules/customer/customer.service');
+const supplierService = require('../src/modules/supplier/supplier.service');
 const reportService = require('../src/modules/report/report.service');
 const { Invoice } = require('../src/modules/invoice/invoice.model');
 const { Bill } = require('../src/modules/bill/bill.model');
@@ -122,6 +124,17 @@ function assertExchangeRateRequired(promiseFactory) {
     assert.equal(
       error.message,
       'Exchange rate is required when document currency differs from base currency'
+    );
+    return true;
+  });
+}
+
+function assertForeignPaymentUnsupported(promiseFactory) {
+  return assert.rejects(promiseFactory, (error) => {
+    assert.equal(error.code, 'FOREIGN_CURRENCY_PAYMENT_UNSUPPORTED');
+    assert.equal(
+      error.message,
+      'Foreign-currency payments require FX gain/loss handling and are not supported in this version'
     );
     return true;
   });
@@ -440,6 +453,322 @@ test('foreign-currency bill posting writes base-currency journal amounts', async
 
   const trialBalance = await reportService.getTrialBalance(fixture.tenant._id, { refresh: true });
   assert.equal(trialBalance.totals.isBalanced, true);
+});
+
+test('vat return uses base-currency amounts for foreign taxed documents', async () => {
+  const fixture = await createFixture();
+  const inputVatAccount = await createInputVatAccount(fixture);
+  const salesTaxRate = await createTaxRate(fixture, 'sales');
+  const purchaseTaxRate = await createTaxRate(fixture, 'purchase');
+  const accounts = await getAccountsByCode(fixture.tenant._id, ['1120', '4100', '2110', '5200']);
+  const arAccountId = accounts.get('1120')._id.toString();
+  const revenueAccountId = accounts.get('4100')._id.toString();
+  const apAccountId = accounts.get('2110')._id.toString();
+  const expenseAccountId = accounts.get('5200')._id.toString();
+
+  const invoice = await invoiceService.createInvoice(
+    fixture.tenant._id,
+    fixture.user._id,
+    baseInvoicePayload({
+      documentCurrency: 'USD',
+      exchangeRate: '3.75',
+      exchangeRateDate: '2026-04-01',
+      exchangeRateSource: 'manual',
+      lineItems: [{
+        description: 'Taxed service',
+        quantity: '1',
+        unitPrice: '100',
+        taxRateId: salesTaxRate._id.toString(),
+        lineTotal: '100',
+      }],
+    }),
+    { auditContext: fixture.auditContext }
+  );
+  await invoiceService.markAsSent(
+    invoice._id,
+    fixture.tenant._id,
+    fixture.user._id,
+    { arAccountId, revenueAccountId },
+    { auditContext: fixture.auditContext }
+  );
+
+  const bill = await billService.createBill(
+    fixture.tenant._id,
+    fixture.user._id,
+    baseBillPayload({
+      documentCurrency: 'USD',
+      exchangeRate: '3.75',
+      exchangeRateDate: '2026-04-01',
+      exchangeRateSource: 'manual',
+      lineItems: [{
+        description: 'Taxed expense',
+        quantity: '1',
+        unitPrice: '100',
+        taxRateId: purchaseTaxRate._id.toString(),
+        lineTotal: '100',
+      }],
+    }),
+    { auditContext: fixture.auditContext }
+  );
+  await billService.postBill(
+    bill._id,
+    fixture.tenant._id,
+    fixture.user._id,
+    { apAccountId, debitAccountId: expenseAccountId },
+    { auditContext: fixture.auditContext }
+  );
+
+  const report = await reportService.getVatReturn(fixture.tenant._id, {
+    startDate: '2026-04-01',
+    endDate: '2026-04-30',
+    includeDetails: true,
+    refresh: true,
+  });
+
+  assert.equal(report.currency, 'SAR');
+  assert.equal(report.amountsIn, 'baseCurrency');
+  assert.deepEqual(report.summary, {
+    outputVAT: '56.25',
+    inputVAT: '56.25',
+    netVAT: '0',
+    status: 'zero',
+  });
+  assert.equal(report.details.sales[0].taxableAmount, '375');
+  assert.equal(report.details.sales[0].taxAmount, '56.25');
+  assert.equal(report.details.sales[0].total, '431.25');
+  assert.equal(report.details.purchases[0].taxableAmount, '375');
+  assert.equal(report.details.purchases[0].taxAmount, '56.25');
+  assert.equal(report.details.purchases[0].total, '431.25');
+  assert.ok(inputVatAccount);
+
+  const trialBalance = await reportService.getTrialBalance(fixture.tenant._id, { refresh: true });
+  assert.equal(trialBalance.totals.isBalanced, true);
+});
+
+test('payment safety blocks foreign documents and keeps same-currency payments compatible', async () => {
+  const fixture = await createFixture();
+  const accounts = await getAccountsByCode(fixture.tenant._id, ['1111', '1120', '4100', '2110', '5200']);
+  const cashAccountId = accounts.get('1111')._id.toString();
+  const arAccountId = accounts.get('1120')._id.toString();
+  const revenueAccountId = accounts.get('4100')._id.toString();
+  const apAccountId = accounts.get('2110')._id.toString();
+  const expenseAccountId = accounts.get('5200')._id.toString();
+
+  const foreignInvoice = await invoiceService.createInvoice(
+    fixture.tenant._id,
+    fixture.user._id,
+    baseInvoicePayload({
+      documentCurrency: 'USD',
+      exchangeRate: '3.75',
+      exchangeRateDate: '2026-04-01',
+      exchangeRateSource: 'manual',
+    }),
+    { auditContext: fixture.auditContext }
+  );
+  await invoiceService.markAsSent(
+    foreignInvoice._id,
+    fixture.tenant._id,
+    fixture.user._id,
+    { arAccountId, revenueAccountId },
+    { auditContext: fixture.auditContext }
+  );
+
+  await assertForeignPaymentUnsupported(() => invoiceService.recordPayment(
+    foreignInvoice._id,
+    fixture.tenant._id,
+    fixture.user._id,
+    { cashAccountId, amount: '100', paymentDate: '2026-04-10' },
+    { auditContext: fixture.auditContext }
+  ));
+
+  const foreignBill = await billService.createBill(
+    fixture.tenant._id,
+    fixture.user._id,
+    baseBillPayload({
+      documentCurrency: 'USD',
+      exchangeRate: '3.75',
+      exchangeRateDate: '2026-04-01',
+      exchangeRateSource: 'manual',
+    }),
+    { auditContext: fixture.auditContext }
+  );
+  await billService.postBill(
+    foreignBill._id,
+    fixture.tenant._id,
+    fixture.user._id,
+    { apAccountId, debitAccountId: expenseAccountId },
+    { auditContext: fixture.auditContext }
+  );
+
+  await assertForeignPaymentUnsupported(() => billService.recordPayment(
+    foreignBill._id,
+    fixture.tenant._id,
+    fixture.user._id,
+    { cashAccountId, amount: '100', paymentDate: '2026-04-10' },
+    { auditContext: fixture.auditContext }
+  ));
+
+  const sameCurrencyInvoice = await invoiceService.createInvoice(
+    fixture.tenant._id,
+    fixture.user._id,
+    baseInvoicePayload({ documentCurrency: 'SAR' }),
+    { auditContext: fixture.auditContext }
+  );
+  await invoiceService.markAsSent(
+    sameCurrencyInvoice._id,
+    fixture.tenant._id,
+    fixture.user._id,
+    { arAccountId, revenueAccountId },
+    { auditContext: fixture.auditContext }
+  );
+  const paidInvoice = await invoiceService.recordPayment(
+    sameCurrencyInvoice._id,
+    fixture.tenant._id,
+    fixture.user._id,
+    { cashAccountId, amount: '100', paymentDate: '2026-04-10' },
+    { auditContext: fixture.auditContext }
+  );
+  assert.equal(paidInvoice.status, 'paid');
+  assert.equal(paidInvoice.remainingAmount, 0);
+
+  const sameCurrencyBill = await billService.createBill(
+    fixture.tenant._id,
+    fixture.user._id,
+    baseBillPayload({ documentCurrency: 'SAR' }),
+    { auditContext: fixture.auditContext }
+  );
+  await billService.postBill(
+    sameCurrencyBill._id,
+    fixture.tenant._id,
+    fixture.user._id,
+    { apAccountId, debitAccountId: expenseAccountId },
+    { auditContext: fixture.auditContext }
+  );
+  const paidBill = await billService.recordPayment(
+    sameCurrencyBill._id,
+    fixture.tenant._id,
+    fixture.user._id,
+    { cashAccountId, amount: '100', paymentDate: '2026-04-10' },
+    { auditContext: fixture.auditContext }
+  );
+  assert.equal(paidBill.status, 'paid');
+  assert.equal(paidBill.remainingAmount, 0);
+});
+
+test('aging reports and customer supplier summaries do not mix foreign document balances', async () => {
+  const fixture = await createFixture();
+  const accounts = await getAccountsByCode(fixture.tenant._id, ['1120', '4100', '2110', '5200']);
+  const arAccountId = accounts.get('1120')._id.toString();
+  const revenueAccountId = accounts.get('4100')._id.toString();
+  const apAccountId = accounts.get('2110')._id.toString();
+  const expenseAccountId = accounts.get('5200')._id.toString();
+  const customer = await customerService.createCustomer(
+    fixture.tenant._id,
+    fixture.user._id,
+    { name: 'Mixed Currency Customer', email: 'mixed-customer@example.com' },
+    { auditContext: fixture.auditContext }
+  );
+  const supplier = await supplierService.createSupplier(
+    fixture.tenant._id,
+    fixture.user._id,
+    { name: 'Mixed Currency Supplier', email: 'mixed-supplier@example.com' },
+    { auditContext: fixture.auditContext }
+  );
+
+  async function createSentInvoice(documentCurrency) {
+    const invoice = await invoiceService.createInvoice(
+      fixture.tenant._id,
+      fixture.user._id,
+      baseInvoicePayload({
+        customerId: customer._id.toString(),
+        customerName: customer.name,
+        documentCurrency,
+        exchangeRate: documentCurrency === 'USD' ? '3.75' : undefined,
+        exchangeRateDate: documentCurrency === 'USD' ? '2026-04-01' : undefined,
+        exchangeRateSource: documentCurrency === 'USD' ? 'manual' : undefined,
+        dueDate: '2099-12-31',
+      }),
+      { auditContext: fixture.auditContext }
+    );
+    await invoiceService.markAsSent(
+      invoice._id,
+      fixture.tenant._id,
+      fixture.user._id,
+      { arAccountId, revenueAccountId },
+      { auditContext: fixture.auditContext }
+    );
+    return invoiceService.getInvoiceById(invoice._id, fixture.tenant._id);
+  }
+
+  async function createPostedBill(documentCurrency) {
+    const bill = await billService.createBill(
+      fixture.tenant._id,
+      fixture.user._id,
+      baseBillPayload({
+        supplierId: supplier._id.toString(),
+        supplierName: supplier.name,
+        documentCurrency,
+        exchangeRate: documentCurrency === 'USD' ? '3.75' : undefined,
+        exchangeRateDate: documentCurrency === 'USD' ? '2026-04-01' : undefined,
+        exchangeRateSource: documentCurrency === 'USD' ? 'manual' : undefined,
+        dueDate: '2099-12-31',
+      }),
+      { auditContext: fixture.auditContext }
+    );
+    await billService.postBill(
+      bill._id,
+      fixture.tenant._id,
+      fixture.user._id,
+      { apAccountId, debitAccountId: expenseAccountId },
+      { auditContext: fixture.auditContext }
+    );
+    return billService.getBillById(bill._id, fixture.tenant._id);
+  }
+
+  const sameCurrencyInvoice = await createSentInvoice('SAR');
+  const foreignInvoice = await createSentInvoice('USD');
+  const sameCurrencyBill = await createPostedBill('SAR');
+  const foreignBill = await createPostedBill('USD');
+
+  const arAging = await reportService.getARAging(fixture.tenant._id, {
+    asOfDate: '2026-04-15',
+    refresh: true,
+  });
+  assert.equal(arAging.summary.totalOutstanding, '100');
+  assert.equal(arAging.summary.excludedForeignDocumentsCount, 1);
+  assert.equal(arAging.warnings[0].code, 'FOREIGN_CURRENCY_BALANCES_UNSUPPORTED');
+  assert.equal(arAging.warnings[0].documents[0].invoiceId, foreignInvoice._id.toString());
+
+  const apAging = await reportService.getAPAging(fixture.tenant._id, {
+    asOfDate: '2026-04-15',
+    refresh: true,
+  });
+  assert.equal(apAging.summary.totalOutstanding, '100');
+  assert.equal(apAging.summary.excludedForeignDocumentsCount, 1);
+  assert.equal(apAging.warnings[0].code, 'FOREIGN_CURRENCY_BALANCES_UNSUPPORTED');
+  assert.equal(apAging.warnings[0].documents[0].billId, foreignBill._id.toString());
+
+  const customerInvoices = await customerService.getCustomerInvoices(customer._id, fixture.tenant._id);
+  assert.equal(customerInvoices.summary.totalInvoiced, 100);
+  assert.equal(customerInvoices.summary.excludedForeignDocumentsCount, 1);
+  assert.equal(customerInvoices.warnings[0].documents[0].invoiceId, foreignInvoice._id.toString());
+
+  const customerStatement = await customerService.getCustomerStatement(customer._id, fixture.tenant._id);
+  assert.equal(customerStatement.summary.outstandingBalance, 100);
+  assert.equal(customerStatement.transactions.length, 1);
+  assert.equal(customerStatement.transactions[0].invoiceId, sameCurrencyInvoice._id.toString());
+  assert.equal(customerStatement.transactions[0].currency, 'SAR');
+
+  const supplierBills = await supplierService.getSupplierBills(supplier._id, fixture.tenant._id);
+  assert.equal(supplierBills.summary.totalBilled, 100);
+  assert.equal(supplierBills.summary.excludedForeignDocumentsCount, 1);
+  assert.equal(supplierBills.warnings[0].documents[0].billId, foreignBill._id.toString());
+
+  const supplierStatement = await supplierService.getSupplierStatement(supplier._id, fixture.tenant._id);
+  assert.equal(supplierStatement.summary.outstandingBalance, 100);
+  assert.equal(supplierStatement.transactions.length, 1);
+  assert.equal(supplierStatement.transactions[0].billId, sameCurrencyBill._id.toString());
+  assert.equal(supplierStatement.transactions[0].currency, 'SAR');
 });
 
 test('foreign-currency documents without base amounts fail posting', async () => {

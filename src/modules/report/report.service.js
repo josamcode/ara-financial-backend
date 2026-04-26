@@ -11,6 +11,7 @@ const { FiscalPeriod } = require('../fiscal-period/fiscalPeriod.model');
 const { Invoice } = require('../invoice/invoice.model');
 const { Bill } = require('../bill/bill.model');
 const { TaxRate } = require('../tax/tax-rate.model');
+const Tenant = require('../tenant/tenant.model');
 const {
   COLLECTIBLE_INVOICE_STATUSES,
 } = require('../invoice/invoice-status');
@@ -31,6 +32,7 @@ const RETAINED_EARNINGS_CODE = '3200';
 const CASH_ACCOUNT_PREFIXES = ['111'];
 const AR_AGING_ELIGIBLE_STATUSES = ['sent', 'partially_paid', 'overdue'];
 const AP_AGING_ELIGIBLE_STATUSES = PAYABLE_BILL_STATUSES;
+const FOREIGN_CURRENCY_BALANCES_WARNING = 'FOREIGN_CURRENCY_BALANCES_UNSUPPORTED';
 const VAT_INVOICE_STATUSES = Object.freeze([
   ...new Set([...COLLECTIBLE_INVOICE_STATUSES, 'paid']),
 ]);
@@ -163,19 +165,30 @@ class ReportService {
     const primaryParams = this._normalizeOptionalAsOfParams(params, 'AR Aging');
 
     return this._getCachedReport('ar-aging', tenantId, primaryParams, async () => {
+      const baseCurrency = await this._getTenantBaseCurrency(tenantId);
       const invoices = await Invoice.find({
         tenantId,
         deletedAt: null,
         status: { $in: AR_AGING_ELIGIBLE_STATUSES },
       })
-        .select('customerId customerName issueDate dueDate total paidAmount remainingAmount status')
+        .select('invoiceNumber customerId customerName issueDate dueDate total paidAmount remainingAmount status currency documentCurrency baseCurrency')
         .lean();
 
       const customerRows = new Map();
+      const foreignDocuments = [];
       let totalOutstanding = 0n;
       let overdueInvoicesCount = 0;
 
       for (const invoice of invoices) {
+        if (this._isForeignCurrencyDocument(invoice, baseCurrency)) {
+          foreignDocuments.push(this._formatUnsupportedForeignDocument(invoice, {
+            idField: 'invoiceId',
+            numberField: 'invoiceNumber',
+            fallbackBaseCurrency: baseCurrency,
+          }));
+          continue;
+        }
+
         const remainingAmount = this._resolveInvoiceRemainingScaledAmount(invoice);
         if (remainingAmount <= 0n) {
           continue;
@@ -230,9 +243,13 @@ class ReportService {
           totalOutstanding: formatScaledInteger(totalOutstanding),
           customersWithOutstanding: rows.length,
           overdueInvoicesCount,
+          excludedForeignDocumentsCount: foreignDocuments.length,
         },
         rows,
         asOfDate: toIsoString(primaryParams.asOfDate),
+        currency: baseCurrency,
+        amountsIn: 'baseCurrency',
+        warnings: this._buildForeignCurrencyBalanceWarnings('AR aging', foreignDocuments),
       };
     });
   }
@@ -241,19 +258,30 @@ class ReportService {
     const primaryParams = this._normalizeOptionalAsOfParams(params, 'AP Aging');
 
     return this._getCachedReport('ap-aging', tenantId, primaryParams, async () => {
+      const baseCurrency = await this._getTenantBaseCurrency(tenantId);
       const bills = await Bill.find({
         tenantId,
         deletedAt: null,
         status: { $in: AP_AGING_ELIGIBLE_STATUSES },
       })
-        .select('supplierId supplierName issueDate dueDate total paidAmount remainingAmount status')
+        .select('supplierId supplierName issueDate dueDate total paidAmount remainingAmount status currency documentCurrency baseCurrency billNumber')
         .lean();
 
       const supplierRows = new Map();
+      const foreignDocuments = [];
       let totalOutstanding = 0n;
       let overdueBillsCount = 0;
 
       for (const bill of bills) {
+        if (this._isForeignCurrencyDocument(bill, baseCurrency)) {
+          foreignDocuments.push(this._formatUnsupportedForeignDocument(bill, {
+            idField: 'billId',
+            numberField: 'billNumber',
+            fallbackBaseCurrency: baseCurrency,
+          }));
+          continue;
+        }
+
         const remainingAmount = this._resolveBillRemainingScaledAmount(bill);
         if (remainingAmount <= 0n) {
           continue;
@@ -308,9 +336,13 @@ class ReportService {
           totalOutstanding: formatScaledInteger(totalOutstanding),
           suppliersWithOutstanding: rows.length,
           overdueBillsCount,
+          excludedForeignDocumentsCount: foreignDocuments.length,
         },
         rows,
         asOfDate: toIsoString(primaryParams.asOfDate),
+        currency: baseCurrency,
+        amountsIn: 'baseCurrency',
+        warnings: this._buildForeignCurrencyBalanceWarnings('AP aging', foreignDocuments),
       };
     });
   }
@@ -319,6 +351,7 @@ class ReportService {
     const primaryParams = this._normalizeVatReturnParams(params);
 
     return this._getCachedReport('vat-return', tenantId, primaryParams, async () => {
+      const baseCurrency = await this._getTenantBaseCurrency(tenantId);
       const [invoices, bills] = await Promise.all([
         this._findVatInvoices(tenantId, primaryParams),
         this._findVatBills(tenantId, primaryParams),
@@ -333,6 +366,7 @@ class ReportService {
         taxRateId: primaryParams.taxRateId,
         groups,
         taxRateIds,
+        baseCurrency,
       });
       const purchases = this._collectVatDocumentLines({
         documents: bills,
@@ -341,6 +375,7 @@ class ReportService {
         taxRateId: primaryParams.taxRateId,
         groups,
         taxRateIds,
+        baseCurrency,
       });
 
       const taxRatesById = await this._getTaxRateNamesById(tenantId, Array.from(taxRateIds));
@@ -350,6 +385,8 @@ class ReportService {
       const report = {
         period: toPeriodRange(primaryParams.startDate, primaryParams.endDate),
         basis: 'accrual',
+        currency: baseCurrency,
+        amountsIn: 'baseCurrency',
         summary: {
           outputVAT: formatScaledInteger(outputVAT),
           inputVAT: formatScaledInteger(inputVAT),
@@ -708,14 +745,14 @@ class ReportService {
 
   async _findVatInvoices(tenantId, params) {
     return Invoice.find(this._buildVatDocumentFilter(tenantId, params, VAT_INVOICE_STATUSES))
-      .select('invoiceNumber customerName issueDate lineItems')
+      .select('invoiceNumber customerName issueDate currency documentCurrency baseCurrency lineItems')
       .sort({ issueDate: 1, invoiceNumber: 1 })
       .lean();
   }
 
   async _findVatBills(tenantId, params) {
     return Bill.find(this._buildVatDocumentFilter(tenantId, params, VAT_BILL_STATUSES))
-      .select('billNumber supplierName issueDate lineItems')
+      .select('billNumber supplierName issueDate currency documentCurrency baseCurrency lineItems')
       .sort({ issueDate: 1, billNumber: 1 })
       .lean();
   }
@@ -745,6 +782,7 @@ class ReportService {
     taxRateId,
     groups,
     taxRateIds,
+    baseCurrency,
   }) {
     const details = [];
     let taxAmount = 0n;
@@ -755,21 +793,36 @@ class ReportService {
       let documentTotal = 0n;
 
       for (const line of document.lineItems || []) {
-        const lineTaxAmount = this._toScaledMoney(line.taxAmount);
-        if (lineTaxAmount <= 0n) {
-          continue;
-        }
-
         const lineTaxRateId = line.taxRateId?.toString?.() || null;
         if (taxRateId && lineTaxRateId !== taxRateId) {
           continue;
         }
 
+        const documentLineTaxAmount = this._toScaledMoney(line.taxAmount);
+        const lineTaxAmount = this._resolveVatLineBaseAmount(document, line, {
+          baseCurrency,
+          baseField: 'lineBaseTaxAmount',
+          documentField: 'taxAmount',
+          requiresBaseAmount: documentLineTaxAmount > 0n,
+        });
+        if (lineTaxAmount <= 0n) {
+          continue;
+        }
+
         const lineTaxRate = this._toScaledMoney(line.taxRate);
-        const lineTaxableAmount = this._toScaledMoney(line.lineSubtotal);
-        const lineTotal = line.lineTotal === undefined || line.lineTotal === null
-          ? lineTaxableAmount + lineTaxAmount
-          : this._toScaledMoney(line.lineTotal);
+        const lineTaxableAmount = this._resolveVatLineBaseAmount(document, line, {
+          baseCurrency,
+          baseField: 'lineBaseSubtotal',
+          documentField: 'lineSubtotal',
+          requiresBaseAmount: true,
+        });
+        const lineTotal = this._resolveVatLineBaseAmount(document, line, {
+          baseCurrency,
+          baseField: 'lineBaseTotal',
+          documentField: 'lineTotal',
+          fallbackAmount: lineTaxableAmount + lineTaxAmount,
+          requiresBaseAmount: true,
+        });
 
         this._addVatBreakdownLine(groups, {
           taxRateId: lineTaxRateId,
@@ -798,6 +851,47 @@ class ReportService {
     }
 
     return { taxAmount, details };
+  }
+
+  _resolveVatLineBaseAmount(
+    document,
+    line,
+    {
+      baseCurrency,
+      baseField,
+      documentField,
+      fallbackAmount = 0n,
+      requiresBaseAmount = false,
+    }
+  ) {
+    const baseValue = line[baseField];
+    const hasBaseValue = baseValue !== undefined && baseValue !== null;
+    const baseAmount = hasBaseValue ? this._toScaledMoney(baseValue) : null;
+
+    if (this._isForeignCurrencyDocument(document, baseCurrency)) {
+      if (requiresBaseAmount && (baseAmount === null || baseAmount <= 0n)) {
+        this._throwBaseAmountsRequiredForVat();
+      }
+
+      return baseAmount ?? 0n;
+    }
+
+    if (baseAmount !== null && baseAmount !== 0n) {
+      return baseAmount;
+    }
+
+    if (line[documentField] !== undefined && line[documentField] !== null) {
+      return this._toScaledMoney(line[documentField]);
+    }
+
+    return fallbackAmount;
+  }
+
+  _throwBaseAmountsRequiredForVat() {
+    throw new BadRequestError(
+      'Base currency amounts are required for foreign-currency VAT reporting',
+      'BASE_AMOUNTS_REQUIRED'
+    );
   }
 
   _addVatBreakdownLine(groups, { taxRateId, taxRate, kind, taxAmount }) {
@@ -1344,6 +1438,56 @@ class ReportService {
       endDate: compareEndDate,
       refresh: false,
     };
+  }
+
+  async _getTenantBaseCurrency(tenantId) {
+    const tenant = await Tenant.findById(tenantId).select('baseCurrency').lean();
+    return this._normalizeCurrencyCode(tenant?.baseCurrency, 'SAR');
+  }
+
+  _normalizeCurrencyCode(value, fallback = 'SAR') {
+    const normalized = value?.toString?.().trim().toUpperCase();
+    return /^[A-Z]{3}$/.test(normalized || '') ? normalized : fallback;
+  }
+
+  _getDocumentBaseCurrency(document, fallbackBaseCurrency = 'SAR') {
+    return this._normalizeCurrencyCode(document?.baseCurrency, fallbackBaseCurrency);
+  }
+
+  _getDocumentCurrency(document, fallbackBaseCurrency = 'SAR') {
+    const baseCurrency = this._getDocumentBaseCurrency(document, fallbackBaseCurrency);
+    return this._normalizeCurrencyCode(
+      document?.documentCurrency || document?.currency || baseCurrency,
+      baseCurrency
+    );
+  }
+
+  _isForeignCurrencyDocument(document, fallbackBaseCurrency = 'SAR') {
+    const baseCurrency = this._getDocumentBaseCurrency(document, fallbackBaseCurrency);
+    const documentCurrency = this._getDocumentCurrency(document, fallbackBaseCurrency);
+    return documentCurrency !== baseCurrency;
+  }
+
+  _formatUnsupportedForeignDocument(document, { idField, numberField, fallbackBaseCurrency }) {
+    return {
+      [idField]: document._id?.toString?.() ?? document._id,
+      [numberField]: document[numberField] || null,
+      documentCurrency: this._getDocumentCurrency(document, fallbackBaseCurrency),
+      baseCurrency: this._getDocumentBaseCurrency(document, fallbackBaseCurrency),
+    };
+  }
+
+  _buildForeignCurrencyBalanceWarnings(reportName, documents) {
+    if (!documents.length) {
+      return [];
+    }
+
+    return [{
+      code: FOREIGN_CURRENCY_BALANCES_WARNING,
+      message: `${reportName} excludes foreign-currency documents because base paid amounts and FX gain/loss handling are not supported in this version`,
+      count: documents.length,
+      documents,
+    }];
   }
 
   _attachComparison(primaryReport, comparisonReport, {

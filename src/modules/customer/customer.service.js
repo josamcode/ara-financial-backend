@@ -8,6 +8,7 @@ const { NotFoundError } = require('../../common/errors');
 const { buildPaginationMeta } = require('../../common/utils/response');
 
 const INVOICED_STATUSES = ['sent', 'partially_paid', 'paid', 'overdue'];
+const FOREIGN_CURRENCY_BALANCES_WARNING = 'FOREIGN_CURRENCY_BALANCES_UNSUPPORTED';
 
 class CustomerService {
   async listCustomers(tenantId, { page = 1, limit = 20, skip = 0, search } = {}) {
@@ -45,11 +46,16 @@ class CustomerService {
     let totalInvoiced = 0;
     let totalPaid = 0;
     let outstandingBalance = 0;
+    const foreignDocuments = [];
 
     for (const inv of derivedInvoices) {
-      const amount = this._resolveInvoiceAmount(inv);
       if (!INVOICED_STATUSES.includes(inv.status)) continue;
+      if (this._isForeignCurrencyDocument(inv)) {
+        foreignDocuments.push(this._formatUnsupportedForeignDocument(inv));
+        continue;
+      }
 
+      const amount = this._resolveInvoiceAmount(inv);
       const paidAmount = this._resolveInvoicePaidAmount(inv, amount);
       const remainingAmount = this._resolveInvoiceRemainingAmount(inv, amount, paidAmount);
 
@@ -65,7 +71,11 @@ class CustomerService {
         totalInvoiced,
         totalPaid,
         outstandingBalance,
+        currency: this._getSummaryBaseCurrency(derivedInvoices),
+        amountsIn: 'baseCurrency',
+        excludedForeignDocumentsCount: foreignDocuments.length,
       },
+      warnings: this._buildForeignCurrencyBalanceWarnings('Customer invoice summary', foreignDocuments),
     };
   }
 
@@ -82,9 +92,14 @@ class CustomerService {
     let totalPaid = 0;
     let outstandingBalance = 0;
     const entries = [];
+    const foreignDocuments = [];
 
     for (const invoice of derivedInvoices) {
       if (!INVOICED_STATUSES.includes(invoice.status)) continue;
+      if (this._isForeignCurrencyDocument(invoice)) {
+        foreignDocuments.push(this._formatUnsupportedForeignDocument(invoice));
+        continue;
+      }
 
       const amount = this._resolveInvoiceAmount(invoice);
       const paidAmount = this._resolveInvoicePaidAmount(invoice, amount);
@@ -103,7 +118,8 @@ class CustomerService {
         credit: 0,
         invoiceId: invoice._id,
         journalEntryId: invoice.sentJournalEntryId || null,
-        currency: invoice.currency || 'EGP',
+        currency: this._getDocumentBaseCurrency(invoice),
+        documentCurrency: this._getDocumentCurrency(invoice),
         _sortDate: new Date(invoice.issueDate).getTime(),
         _sortPriority: 0,
         _sortKey: `${invoice.invoiceNumber}:${invoice._id}`,
@@ -125,7 +141,8 @@ class CustomerService {
             credit: paymentAmount,
             invoiceId: invoice._id,
             journalEntryId: payment.journalEntryId || null,
-            currency: invoice.currency || 'EGP',
+            currency: this._getDocumentBaseCurrency(invoice),
+            documentCurrency: this._getDocumentCurrency(invoice),
             _sortDate: new Date(payment.date).getTime(),
             _sortPriority: 1,
             _sortKey: `${invoice.invoiceNumber}:${index}`,
@@ -160,9 +177,13 @@ class CustomerService {
         totalInvoiced,
         totalPaid,
         outstandingBalance,
+        currency: this._getSummaryBaseCurrency(derivedInvoices),
+        amountsIn: 'baseCurrency',
+        excludedForeignDocumentsCount: foreignDocuments.length,
       },
       transactions: paginatedTransactions,
       pagination,
+      warnings: this._buildForeignCurrencyBalanceWarnings('Customer statement', foreignDocuments),
     };
   }
 
@@ -258,6 +279,54 @@ class CustomerService {
 
     if (invoice.status === 'paid') return 0;
     return this._roundAmount(amount - paidAmount);
+  }
+
+  _normalizeCurrencyCode(value, fallback = 'SAR') {
+    const normalized = value?.toString?.().trim().toUpperCase();
+    return /^[A-Z]{3}$/.test(normalized || '') ? normalized : fallback;
+  }
+
+  _getDocumentBaseCurrency(invoice, fallbackBaseCurrency = 'SAR') {
+    return this._normalizeCurrencyCode(invoice?.baseCurrency, fallbackBaseCurrency);
+  }
+
+  _getDocumentCurrency(invoice, fallbackBaseCurrency = 'SAR') {
+    const baseCurrency = this._getDocumentBaseCurrency(invoice, fallbackBaseCurrency);
+    return this._normalizeCurrencyCode(
+      invoice?.documentCurrency || invoice?.currency || baseCurrency,
+      baseCurrency
+    );
+  }
+
+  _isForeignCurrencyDocument(invoice) {
+    const baseCurrency = this._getDocumentBaseCurrency(invoice);
+    const documentCurrency = this._getDocumentCurrency(invoice, baseCurrency);
+    return documentCurrency !== baseCurrency;
+  }
+
+  _getSummaryBaseCurrency(invoices) {
+    const invoice = invoices.find((item) => item?.baseCurrency);
+    return this._getDocumentBaseCurrency(invoice || null);
+  }
+
+  _formatUnsupportedForeignDocument(invoice) {
+    return {
+      invoiceId: invoice._id?.toString?.() ?? invoice._id,
+      invoiceNumber: invoice.invoiceNumber || null,
+      documentCurrency: this._getDocumentCurrency(invoice),
+      baseCurrency: this._getDocumentBaseCurrency(invoice),
+    };
+  }
+
+  _buildForeignCurrencyBalanceWarnings(context, documents) {
+    if (!documents.length) return [];
+
+    return [{
+      code: FOREIGN_CURRENCY_BALANCES_WARNING,
+      message: `${context} excludes foreign-currency documents because base paid amounts and FX gain/loss handling are not supported in this version`,
+      count: documents.length,
+      documents,
+    }];
   }
 }
 

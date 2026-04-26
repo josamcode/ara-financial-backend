@@ -353,6 +353,12 @@ class InvoiceService {
   async recordPayment(invoiceId, tenantId, userId, { cashAccountId, amount, paymentDate }, options = {}) {
     const invoice = await Invoice.findOne({ _id: invoiceId, tenantId });
     if (!invoice) throw new NotFoundError('Invoice not found');
+    if (this._isForeignCurrencyDocument(invoice)) {
+      throw new BadRequestError(
+        'Foreign-currency payments require FX gain/loss handling and are not supported in this version',
+        'FOREIGN_CURRENCY_PAYMENT_UNSUPPORTED'
+      );
+    }
     if (!COLLECTIBLE_INVOICE_STATUSES.includes(invoice.status)) {
       throw new BadRequestError('Only sent, overdue, or partially paid invoices can be paid');
     }
@@ -650,6 +656,15 @@ class InvoiceService {
 
   _normalizePostingCurrency(value) {
     return this._moneyToString(value).toUpperCase();
+  }
+
+  _isForeignCurrencyDocument(invoice) {
+    const baseCurrency = this._normalizePostingCurrency(invoice.baseCurrency || 'SAR');
+    const documentCurrency = this._normalizePostingCurrency(
+      invoice.documentCurrency || invoice.currency || baseCurrency
+    );
+
+    return documentCurrency !== baseCurrency;
   }
 
   async _calculateDraftInvoice(tenantId, invoice) {
