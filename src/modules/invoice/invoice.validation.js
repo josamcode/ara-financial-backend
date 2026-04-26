@@ -173,9 +173,23 @@ const markSentSchema = z.object({
 });
 
 const recordPaymentSchema = z.object({
-  cashAccountId: requiredObjectId('Cash or bank account'),
+  accountId: objectId.optional(),
+  cashAccountId: objectId.optional(),
   amount: positiveMonetaryAmount,
   paymentDate: z.string().refine((v) => !isNaN(Date.parse(v)), 'Valid date required').optional(),
+  paymentCurrency: currencyCode.optional(),
+  paymentExchangeRate: positiveExchangeRate,
+  paymentExchangeRateDate: exchangeRateDate.optional(),
+  paymentExchangeRateSource: z.enum(EXCHANGE_RATE_SOURCES).optional(),
+  reference: z.string().trim().max(200).optional(),
+}).superRefine((payload, ctx) => {
+  if (!payload.accountId && !payload.cashAccountId) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['cashAccountId'],
+      message: 'Cash or bank account is required',
+    });
+  }
 });
 
 const bulkInvoiceIdsSchema = z.object({

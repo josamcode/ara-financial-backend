@@ -59,6 +59,7 @@ const EGYPTIAN_COA_TEMPLATE = [
   { code: '4100', nameAr: 'إيرادات المبيعات', nameEn: 'Sales Revenue', type: 'revenue', nature: 'credit', level: 2, parentCode: '4000' },
   { code: '4200', nameAr: 'إيرادات خدمات', nameEn: 'Service Revenue', type: 'revenue', nature: 'credit', level: 2, parentCode: '4000' },
   { code: '4300', nameAr: 'إيرادات أخرى', nameEn: 'Other Revenue', type: 'revenue', nature: 'credit', level: 2, parentCode: '4000' },
+  { code: '4310', nameAr: 'أرباح فروق العملة', nameEn: 'Foreign Exchange Gain', type: 'revenue', nature: 'credit', level: 2, parentCode: '4000' },
   { code: '4400', nameAr: 'خصومات ومردودات المبيعات', nameEn: 'Sales Discounts and Returns', type: 'revenue', nature: 'debit', level: 2, parentCode: '4000' },
 
   // ── EXPENSES (5xxx) ──────────────────────────────
@@ -72,6 +73,7 @@ const EGYPTIAN_COA_TEMPLATE = [
   { code: '5700', nameAr: 'مصروفات إدارية', nameEn: 'Administrative Expense', type: 'expense', nature: 'debit', level: 2, parentCode: '5000' },
   { code: '5800', nameAr: 'مصروفات بنكية', nameEn: 'Bank Charges', type: 'expense', nature: 'debit', level: 2, parentCode: '5000' },
   { code: '5900', nameAr: 'مصروفات أخرى', nameEn: 'Other Expenses', type: 'expense', nature: 'debit', level: 2, parentCode: '5000' },
+  { code: '5910', nameAr: 'خسائر فروق العملة', nameEn: 'Foreign Exchange Loss', type: 'expense', nature: 'debit', level: 2, parentCode: '5000' },
 ];
 
 module.exports = EGYPTIAN_COA_TEMPLATE;

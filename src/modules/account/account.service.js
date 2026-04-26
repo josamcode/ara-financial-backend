@@ -272,6 +272,39 @@ class AccountService {
     return account;
   }
 
+  async findFxGainAccount(tenantId) {
+    return this._findFxAccount(tenantId, {
+      code: '4310',
+      type: 'revenue',
+    });
+  }
+
+  async findFxLossAccount(tenantId) {
+    return this._findFxAccount(tenantId, {
+      code: '5910',
+      type: 'expense',
+    });
+  }
+
+  async _findFxAccount(tenantId, { code, type }) {
+    const account = await Account.findOne({
+      tenantId,
+      code,
+      type,
+      isActive: true,
+      isParentOnly: false,
+    });
+
+    if (!account) {
+      throw new BadRequestError(
+        'Foreign exchange gain/loss accounts are not configured',
+        'FX_ACCOUNT_NOT_CONFIGURED'
+      );
+    }
+
+    return account;
+  }
+
   /**
    * Apply the Egyptian CoA template for a tenant.
    */

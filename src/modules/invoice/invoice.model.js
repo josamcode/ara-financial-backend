@@ -55,6 +55,8 @@ const lineItemSchema = new mongoose.Schema(
 const paymentSchema = new mongoose.Schema(
   {
     amount: { type: Number, required: true, min: 0 },
+    baseAmount: { type: Number, default: 0, min: 0 },
+    carryingBaseAmount: { type: Number, default: 0, min: 0 },
     date: { type: Date, required: true, default: Date.now },
     accountId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -66,6 +68,42 @@ const paymentSchema = new mongoose.Schema(
       ref: 'JournalEntry',
       required: true,
     },
+    paymentCurrency: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      minlength: 3,
+      maxlength: 3,
+      match: [/^[A-Z]{3}$/, 'Payment currency must be a 3-letter ISO code'],
+      default: null,
+    },
+    paymentExchangeRate: {
+      type: mongoose.Schema.Types.Decimal128,
+      default: mongoose.Types.Decimal128.fromString('1'),
+      validate: {
+        validator(value) {
+          const numeric = Number(value?.toString?.() ?? value);
+          return Number.isFinite(numeric) && numeric > 0;
+        },
+        message: 'Payment exchange rate must be greater than zero',
+      },
+    },
+    paymentExchangeRateDate: {
+      type: Date,
+      default: Date.now,
+    },
+    paymentExchangeRateSource: {
+      type: String,
+      enum: EXCHANGE_RATE_SOURCES,
+      default: 'company_rate',
+    },
+    fxGainLossAmount: { type: Number, default: 0, min: 0 },
+    fxGainLossType: {
+      type: String,
+      enum: ['gain', 'loss', 'none'],
+      default: 'none',
+    },
+    reference: { type: String, trim: true, maxlength: 200, default: '' },
   },
   { _id: true }
 );
@@ -149,10 +187,23 @@ const invoiceSchema = new mongoose.Schema(
       default: mongoose.Types.Decimal128.fromString('0'),
     },
     paidAmount: { type: Number, default: 0 },
+    paidBaseAmount: { type: Number, default: 0 },
     remainingAmount: {
       type: Number,
       default() {
         return Number(this.total?.toString?.() ?? this.total ?? 0);
+      },
+    },
+    remainingBaseAmount: {
+      type: Number,
+      default() {
+        return Number(
+          this.baseTotal?.toString?.() ??
+          this.total?.toString?.() ??
+          this.baseTotal ??
+          this.total ??
+          0
+        );
       },
     },
     payments: { type: [paymentSchema], default: [] },
@@ -202,8 +253,51 @@ const invoiceSchema = new mongoose.Schema(
         const totalAmount = resolveInvoiceTotalAmount(ret);
         ret.paidAmount = resolveInvoicePaidAmount(ret, totalAmount);
         ret.remainingAmount = resolveInvoiceRemainingAmount(ret, totalAmount, ret.paidAmount);
+        const baseTotalAmount = Number(ret.baseTotal || (sameCurrency ? ret.total : 0) || 0);
+        const paidBaseDefaulted = typeof _doc.$isDefault === 'function' &&
+          _doc.$isDefault('paidBaseAmount');
+        const remainingBaseDefaulted = typeof _doc.$isDefault === 'function' &&
+          _doc.$isDefault('remainingBaseAmount');
+        ret.paidBaseAmount = typeof ret.paidBaseAmount === 'number' && !paidBaseDefaulted
+          ? ret.paidBaseAmount
+          : sameCurrency
+            ? ret.paidAmount
+            : 0;
+        ret.remainingBaseAmount = typeof ret.remainingBaseAmount === 'number' && !remainingBaseDefaulted
+          ? ret.remainingBaseAmount
+          : Math.max(baseTotalAmount - ret.paidBaseAmount, 0);
         ret.status = resolveInvoiceStatus(ret);
-        ret.payments = Array.isArray(ret.payments) ? ret.payments : [];
+        ret.payments = Array.isArray(ret.payments)
+          ? ret.payments.map((payment) => ({
+            ...payment,
+            baseAmount: typeof payment.baseAmount === 'number'
+              ? (sameCurrency && payment.baseAmount === 0 && payment.amount > 0
+                ? payment.amount
+                : payment.baseAmount)
+              : sameCurrency
+                ? payment.amount
+                : 0,
+            carryingBaseAmount: typeof payment.carryingBaseAmount === 'number'
+              ? (sameCurrency && payment.carryingBaseAmount === 0 && payment.amount > 0
+                ? payment.amount
+                : payment.carryingBaseAmount)
+              : sameCurrency
+                ? payment.amount
+                : 0,
+            paymentCurrency: payment.paymentCurrency || ret.documentCurrency || ret.baseCurrency || 'SAR',
+            paymentExchangeRate: payment.paymentExchangeRate
+              ? dec(payment.paymentExchangeRate)
+              : sameCurrency
+                ? '1'
+                : '0',
+            paymentExchangeRateSource: payment.paymentExchangeRateSource || 'company_rate',
+            fxGainLossAmount: typeof payment.fxGainLossAmount === 'number'
+              ? payment.fxGainLossAmount
+              : 0,
+            fxGainLossType: payment.fxGainLossType || 'none',
+            reference: payment.reference || '',
+          }))
+          : [];
         if (ret.lineItems) {
           ret.lineItems = ret.lineItems.map((item) => ({
             ...item,

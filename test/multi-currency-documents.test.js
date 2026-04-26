@@ -15,6 +15,7 @@ const { Invoice } = require('../src/modules/invoice/invoice.model');
 const { Bill } = require('../src/modules/bill/bill.model');
 const { JournalEntry } = require('../src/modules/journal/journal.model');
 const { toScaledInteger } = require('../src/common/utils/money');
+const { calculateFxPayment } = require('../src/modules/currency/fx-payment');
 const {
   ensureDatabase,
   closeDatabase,
@@ -139,6 +140,83 @@ function assertForeignPaymentUnsupported(promiseFactory) {
     return true;
   });
 }
+
+test('FX payment helper calculates invoice-style gain/loss numbers', () => {
+  const result = calculateFxPayment({
+    documentAmount: '100',
+    documentExchangeRate: '3.75',
+    paymentExchangeRate: '3.80',
+  });
+
+  assert.deepEqual(result, {
+    documentPaidAmount: '100',
+    carryingBaseAmount: '375',
+    paymentBaseAmount: '380',
+    signedDifference: '5',
+    fxGainLossAmount: '5',
+    fxGainLossType: 'gain',
+  });
+});
+
+test('FX payment helper supports final payment remainingBaseAmount override', () => {
+  const result = calculateFxPayment({
+    documentAmount: '100',
+    documentExchangeRate: '3.75',
+    paymentExchangeRate: '3.80',
+    isFinalPayment: true,
+    remainingBaseAmount: '374.99',
+  });
+
+  assert.equal(result.documentPaidAmount, '100');
+  assert.equal(result.carryingBaseAmount, '374.99');
+  assert.equal(result.paymentBaseAmount, '380');
+  assert.equal(result.signedDifference, '5.01');
+  assert.equal(result.fxGainLossAmount, '5.01');
+  assert.equal(result.fxGainLossType, 'gain');
+});
+
+test('FX account resolver finds configured gain and loss accounts', async () => {
+  const fixture = await createFixture();
+
+  const gainAccount = await accountService.findFxGainAccount(fixture.tenant._id);
+  const lossAccount = await accountService.findFxLossAccount(fixture.tenant._id);
+
+  assert.equal(gainAccount.code, '4310');
+  assert.equal(gainAccount.type, 'revenue');
+  assert.equal(gainAccount.nature, 'credit');
+  assert.equal(gainAccount.isActive, true);
+  assert.equal(gainAccount.isParentOnly, false);
+  assert.equal(lossAccount.code, '5910');
+  assert.equal(lossAccount.type, 'expense');
+  assert.equal(lossAccount.nature, 'debit');
+  assert.equal(lossAccount.isActive, true);
+  assert.equal(lossAccount.isParentOnly, false);
+});
+
+test('FX account resolver throws when gain or loss accounts are missing', async () => {
+  const fixture = await createFixture();
+  const accounts = await getAccountsByCode(fixture.tenant._id, ['4310', '5910']);
+
+  await accountService.deleteAccount(accounts.get('4310')._id, fixture.tenant._id, {
+    userId: fixture.user._id,
+    auditContext: fixture.auditContext,
+  });
+  await accountService.deleteAccount(accounts.get('5910')._id, fixture.tenant._id, {
+    userId: fixture.user._id,
+    auditContext: fixture.auditContext,
+  });
+
+  await assert.rejects(() => accountService.findFxGainAccount(fixture.tenant._id), (error) => {
+    assert.equal(error.code, 'FX_ACCOUNT_NOT_CONFIGURED');
+    assert.equal(error.message, 'Foreign exchange gain/loss accounts are not configured');
+    return true;
+  });
+  await assert.rejects(() => accountService.findFxLossAccount(fixture.tenant._id), (error) => {
+    assert.equal(error.code, 'FX_ACCOUNT_NOT_CONFIGURED');
+    assert.equal(error.message, 'Foreign exchange gain/loss accounts are not configured');
+    return true;
+  });
+});
 
 test('same-currency invoice stores snapshot and matching base totals', async () => {
   const fixture = await createFixture();
@@ -630,6 +708,21 @@ test('payment safety blocks foreign documents and keeps same-currency payments c
   );
   assert.equal(paidInvoice.status, 'paid');
   assert.equal(paidInvoice.remainingAmount, 0);
+  const reloadedPaidInvoice = await Invoice.findOne({
+    _id: paidInvoice._id,
+    tenantId: fixture.tenant._id,
+  });
+  const invoicePayment = reloadedPaidInvoice.payments[0];
+  assert.equal(reloadedPaidInvoice.paidBaseAmount, 100);
+  assert.equal(reloadedPaidInvoice.remainingBaseAmount, 0);
+  assert.equal(invoicePayment.amount, 100);
+  assert.equal(invoicePayment.baseAmount, 100);
+  assert.equal(invoicePayment.carryingBaseAmount, 100);
+  assert.equal(invoicePayment.paymentCurrency, 'SAR');
+  assert.equal(invoicePayment.paymentExchangeRate.toString(), '1');
+  assert.equal(invoicePayment.paymentExchangeRateSource, 'company_rate');
+  assert.equal(invoicePayment.fxGainLossAmount, 0);
+  assert.equal(invoicePayment.fxGainLossType, 'none');
 
   const sameCurrencyBill = await billService.createBill(
     fixture.tenant._id,
@@ -653,6 +746,21 @@ test('payment safety blocks foreign documents and keeps same-currency payments c
   );
   assert.equal(paidBill.status, 'paid');
   assert.equal(paidBill.remainingAmount, 0);
+  const reloadedPaidBill = await Bill.findOne({
+    _id: paidBill._id,
+    tenantId: fixture.tenant._id,
+  });
+  const billPayment = reloadedPaidBill.payments[0];
+  assert.equal(reloadedPaidBill.paidBaseAmount, 100);
+  assert.equal(reloadedPaidBill.remainingBaseAmount, 0);
+  assert.equal(billPayment.amount, 100);
+  assert.equal(billPayment.baseAmount, 100);
+  assert.equal(billPayment.carryingBaseAmount, 100);
+  assert.equal(billPayment.paymentCurrency, 'SAR');
+  assert.equal(billPayment.paymentExchangeRate.toString(), '1');
+  assert.equal(billPayment.paymentExchangeRateSource, 'company_rate');
+  assert.equal(billPayment.fxGainLossAmount, 0);
+  assert.equal(billPayment.fxGainLossType, 'none');
 });
 
 test('aging reports and customer supplier summaries do not mix foreign document balances', async () => {

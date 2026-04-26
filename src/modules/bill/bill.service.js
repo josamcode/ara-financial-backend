@@ -82,7 +82,9 @@ class BillService {
       baseTaxTotal: mongoose.Types.Decimal128.fromString(calculatedBill.baseTaxTotal),
       baseTotal: mongoose.Types.Decimal128.fromString(calculatedBill.baseTotal),
       paidAmount: 0,
+      paidBaseAmount: 0,
       remainingAmount: Number(calculatedBill.total),
+      remainingBaseAmount: Number(calculatedBill.baseTotal),
       payments: [],
       notes: calculatedBill.notes,
       status: 'draft',
@@ -247,7 +249,9 @@ class BillService {
     bill.baseTaxTotal = mongoose.Types.Decimal128.fromString(calculatedBill.baseTaxTotal);
     bill.baseTotal = mongoose.Types.Decimal128.fromString(calculatedBill.baseTotal);
     bill.paidAmount = 0;
+    bill.paidBaseAmount = 0;
     bill.remainingAmount = Number(calculatedBill.total);
+    bill.remainingBaseAmount = Number(calculatedBill.baseTotal);
 
     await bill.save();
 
@@ -319,7 +323,9 @@ class BillService {
     bill.status = 'posted';
     bill.apAccountId = apAccountId;
     bill.paidAmount = 0;
+    bill.paidBaseAmount = 0;
     bill.remainingAmount = roundMonetaryAmount(Number(documentTotalStr));
+    bill.remainingBaseAmount = roundMonetaryAmount(Number(totalStr));
     bill.postedAt = new Date();
     bill.postedJournalEntryId = entry._id;
     await bill.save();
@@ -338,7 +344,23 @@ class BillService {
     return bill;
   }
 
-  async recordPayment(billId, tenantId, userId, { cashAccountId, amount, paymentDate }, options = {}) {
+  async recordPayment(
+    billId,
+    tenantId,
+    userId,
+    {
+      cashAccountId,
+      accountId,
+      amount,
+      paymentDate,
+      paymentCurrency,
+      paymentExchangeRate,
+      paymentExchangeRateDate,
+      paymentExchangeRateSource,
+      reference,
+    },
+    options = {}
+  ) {
     const bill = await Bill.findOne({ _id: billId, tenantId });
     if (!bill) throw new NotFoundError('Bill not found');
     if (this._isForeignCurrencyDocument(bill)) {
@@ -351,9 +373,18 @@ class BillService {
       throw new BadRequestError('Only posted, overdue, or partially paid bills can be paid');
     }
 
+    const paymentAccountId = cashAccountId || accountId;
+    if (!paymentAccountId) {
+      throw new BadRequestError('Cash or bank account is required');
+    }
+    const normalizedPaymentCurrency = this._normalizePaymentCurrency(paymentCurrency, bill);
+    this._assertSameCurrencyPaymentInput(bill, normalizedPaymentCurrency, paymentExchangeRate);
+
     const totalAmount = resolveBillTotalAmount(bill);
     const paidAmount = resolveBillPaidAmount(bill, totalAmount);
     const remainingAmount = resolveBillRemainingAmount(bill, totalAmount, paidAmount);
+    const totalBaseAmount = this._resolveBaseTotalAmount(bill, totalAmount);
+    const paidBaseAmount = this._resolvePaidBaseAmount(bill, totalBaseAmount, paidAmount);
     const paymentAmount = roundMonetaryAmount(Number(amount));
 
     if (!Number.isFinite(paymentAmount) || paymentAmount <= 0) {
@@ -375,6 +406,8 @@ class BillService {
 
     const amountStr = paymentAmount.toFixed(6).replace(/\.?0+$/, '');
     const date = paymentDate ? new Date(paymentDate) : new Date();
+    const exchangeRateDate = paymentExchangeRateDate ? new Date(paymentExchangeRateDate) : date;
+    const paymentReference = reference ? String(reference).trim() : '';
     const paymentDescription = `Bill payment - ${bill.billNumber}`;
 
     const entry = await journalService.createEntry(
@@ -386,7 +419,7 @@ class BillService {
         reference: bill.billNumber,
         lines: [
           { accountId: apAccountId, debit: amountStr, credit: '0' },
-          { accountId: cashAccountId, debit: '0', credit: amountStr },
+          { accountId: paymentAccountId, debit: '0', credit: amountStr },
         ].map((line) => ({ ...line, description: paymentDescription })),
       },
       { auditContext: options.auditContext }
@@ -397,11 +430,23 @@ class BillService {
     bill.paidAmount = roundMonetaryAmount(paidAmount + paymentAmount);
     bill.remainingAmount = roundMonetaryAmount(totalAmount - bill.paidAmount);
     if (bill.remainingAmount < 0) bill.remainingAmount = 0;
+    bill.paidBaseAmount = roundMonetaryAmount(paidBaseAmount + paymentAmount);
+    bill.remainingBaseAmount = roundMonetaryAmount(totalBaseAmount - bill.paidBaseAmount);
+    if (bill.remainingBaseAmount < 0) bill.remainingBaseAmount = 0;
     bill.payments.push({
       amount: paymentAmount,
+      baseAmount: paymentAmount,
+      carryingBaseAmount: paymentAmount,
       date,
-      accountId: cashAccountId,
+      accountId: paymentAccountId,
       journalEntryId: entry._id,
+      paymentCurrency: normalizedPaymentCurrency,
+      paymentExchangeRate: '1',
+      paymentExchangeRateDate: exchangeRateDate,
+      paymentExchangeRateSource: paymentExchangeRateSource || 'company_rate',
+      fxGainLossAmount: 0,
+      fxGainLossType: 'none',
+      reference: paymentReference,
     });
     bill.status = bill.remainingAmount === 0
       ? 'paid'
@@ -763,6 +808,68 @@ class BillService {
     }
 
     return supplier;
+  }
+
+  _resolveBaseTotalAmount(bill, totalAmount) {
+    const baseTotal = Number(bill.baseTotal?.toString?.() ?? bill.baseTotal ?? 0);
+    if (Number.isFinite(baseTotal) && baseTotal > 0) {
+      return roundMonetaryAmount(baseTotal);
+    }
+
+    return this._isForeignCurrencyDocument(bill) ? roundMonetaryAmount(baseTotal) : totalAmount;
+  }
+
+  _resolvePaidBaseAmount(bill, totalBaseAmount, paidAmount) {
+    if (
+      typeof bill.paidBaseAmount === 'number' &&
+      !this._isDefaultPath(bill, 'paidBaseAmount')
+    ) {
+      return roundMonetaryAmount(bill.paidBaseAmount);
+    }
+
+    if (!this._isForeignCurrencyDocument(bill)) {
+      return roundMonetaryAmount(paidAmount);
+    }
+
+    return bill.status === 'paid' ? totalBaseAmount : 0;
+  }
+
+  _isDefaultPath(document, path) {
+    return typeof document?.$isDefault === 'function' && document.$isDefault(path);
+  }
+
+  _normalizePaymentCurrency(value, bill) {
+    const fallback = bill.documentCurrency || bill.currency || bill.baseCurrency || 'SAR';
+    const normalized = this._normalizePostingCurrency(value || fallback);
+
+    if (!/^[A-Z]{3}$/.test(normalized)) {
+      throw new BadRequestError('Payment currency is invalid', 'INVALID_CURRENCY');
+    }
+
+    return normalized;
+  }
+
+  _assertSameCurrencyPaymentInput(bill, paymentCurrency, paymentExchangeRate) {
+    const baseCurrency = this._normalizePostingCurrency(bill.baseCurrency || 'SAR');
+    const documentCurrency = this._normalizePostingCurrency(
+      bill.documentCurrency || bill.currency || baseCurrency
+    );
+
+    if (
+      paymentCurrency !== baseCurrency ||
+      paymentCurrency !== documentCurrency ||
+      !this._isRateOne(paymentExchangeRate)
+    ) {
+      throw new BadRequestError(
+        'Foreign-currency payments require FX gain/loss handling and are not supported in this version',
+        'FOREIGN_CURRENCY_PAYMENT_UNSUPPORTED'
+      );
+    }
+  }
+
+  _isRateOne(rate) {
+    const normalized = this._moneyToString(rate);
+    return !normalized || /^1(\.0+)?$/.test(normalized);
   }
 
   _canCancelBill(bill) {
