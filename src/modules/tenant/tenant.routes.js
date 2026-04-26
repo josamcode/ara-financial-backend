@@ -3,10 +3,12 @@
 const { Router } = require('express');
 const multer = require('multer');
 const tenantController = require('./tenant.controller');
+const validate = require('../../common/middleware/validate');
 const asyncHandler = require('../../common/middleware/asyncHandler');
 const { authenticate, authorize, tenantContext } = require('../../common/middleware/auth');
 const { BadRequestError } = require('../../common/errors');
 const { PERMISSIONS } = require('../auth/role.model');
+const { baseCurrencySchema } = require('./tenant.validation');
 
 const router = Router();
 const logoUpload = multer({
@@ -51,6 +53,13 @@ router.get(
   '/',
   authorize(PERMISSIONS.TENANT_READ),
   asyncHandler(tenantController.get)
+);
+
+router.patch(
+  '/base-currency',
+  authorize(PERMISSIONS.TENANT_UPDATE),
+  validate({ body: baseCurrencySchema }),
+  asyncHandler(tenantController.updateBaseCurrency)
 );
 
 router.patch(

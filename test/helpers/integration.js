@@ -14,10 +14,15 @@ const Tenant = require('../../src/modules/tenant/tenant.model');
 const { Role } = require('../../src/modules/auth/role.model');
 const { Account } = require('../../src/modules/account/account.model');
 const { TaxRate } = require('../../src/modules/tax/tax-rate.model');
+const { ExchangeRate } = require('../../src/modules/exchange-rate/exchange-rate.model');
 const { Plan } = require('../../src/modules/billing/plan.model');
 const { TenantSubscription } = require('../../src/modules/billing/tenant-subscription.model');
 const { JournalEntry } = require('../../src/modules/journal/journal.model');
 const JournalCounter = require('../../src/modules/journal/journalCounter.model');
+const { Invoice } = require('../../src/modules/invoice/invoice.model');
+const InvoiceCounter = require('../../src/modules/invoice/invoiceCounter.model');
+const { Bill } = require('../../src/modules/bill/bill.model');
+const BillCounter = require('../../src/modules/bill/billCounter.model');
 const { FiscalPeriod } = require('../../src/modules/fiscal-period/fiscalPeriod.model');
 const AuditLog = require('../../src/modules/audit/audit.model');
 
@@ -49,10 +54,15 @@ async function closeDatabase() {
 async function cleanupTenantData(tenantIds) {
   for (const tenantId of tenantIds) {
     await TaxRate.deleteMany({ tenantId });
+    await ExchangeRate.deleteMany({ tenantId });
     await JournalEntry.deleteMany({ tenantId });
+    await Invoice.deleteMany({ tenantId });
+    await Bill.deleteMany({ tenantId });
     await Account.deleteMany({ tenantId });
     await FiscalPeriod.deleteMany({ tenantId });
     await JournalCounter.deleteMany({ tenantId });
+    await InvoiceCounter.deleteMany({ tenantId });
+    await BillCounter.deleteMany({ tenantId });
     await TenantSubscription.deleteMany({ tenantId });
     await AuditLog.collection.deleteMany({ tenantId });
     await User.deleteMany({ tenantId });

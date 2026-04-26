@@ -19,6 +19,19 @@ class TenantController {
     return success(res, { tenant });
   }
 
+  async updateBaseCurrency(req, res) {
+    const auditContext = getAuditContext(req);
+    const tenant = await tenantService.updateBaseCurrency(
+      req.user.tenantId,
+      req.body.baseCurrency,
+      {
+        userId: req.user.userId,
+        auditContext,
+      }
+    );
+    return success(res, { tenant });
+  }
+
   async uploadLogo(req, res) {
     const auditContext = getAuditContext(req);
     const tenant = await tenantService.uploadLogo(req.user.tenantId, req.file, {

@@ -45,9 +45,12 @@ const tenantSchema = new mongoose.Schema(
     },
     baseCurrency: {
       type: String,
-      default: 'EGP',
+      default: 'SAR',
+      trim: true,
       uppercase: true,
+      minlength: 3,
       maxlength: 3,
+      match: [/^[A-Z]{3}$/, 'Base currency must be a 3-letter ISO code'],
     },
     fiscalYearStartMonth: {
       type: Number,

@@ -74,6 +74,8 @@ function createApp() {
   const paymentRoutes = require('./modules/payment/payment.routes');
   const billingRoutes = require('./modules/billing/billing.routes');
   const taxRoutes = require('./modules/tax/tax.routes');
+  const currencyRoutes = require('./modules/currency/currency.routes');
+  const exchangeRateRoutes = require('./modules/exchange-rate/exchange-rate.routes');
 
   app.use('/api/v1/auth', authRoutes);
   app.use('/api/v1/users', userRoutes);
@@ -92,6 +94,8 @@ function createApp() {
   app.use('/api/v1/payments', paymentRoutes);
   app.use('/api/v1/billing', billingRoutes);
   app.use('/api/v1/tax-rates', taxRoutes);
+  app.use('/api/v1/currencies', currencyRoutes);
+  app.use('/api/v1/exchange-rates', exchangeRateRoutes);
 
   // ── 404 handler ────────────────────────────────
   app.use((_req, _res, next) => {

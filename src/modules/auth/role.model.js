@@ -36,6 +36,12 @@ const PERMISSIONS = {
   TENANT_UPDATE: 'tenant:update',
   TENANT_DELETE: 'tenant:delete',
 
+  // Currency permissions
+  CURRENCY_READ: 'currency:read',
+  CURRENCY_MANAGE: 'currency:manage',
+  EXCHANGE_RATE_READ: 'exchangeRate:read',
+  EXCHANGE_RATE_MANAGE: 'exchangeRate:manage',
+
   // Fiscal period permissions
   FISCAL_READ: 'fiscal:read',
   FISCAL_CREATE: 'fiscal:create',
@@ -118,6 +124,8 @@ const DEFAULT_ROLES = {
       PERMISSIONS.DASHBOARD_VIEW,
       PERMISSIONS.USER_READ,
       PERMISSIONS.TENANT_READ,
+      PERMISSIONS.CURRENCY_READ,
+      PERMISSIONS.EXCHANGE_RATE_READ,
       PERMISSIONS.INVOICE_READ,
       PERMISSIONS.INVOICE_CREATE,
       PERMISSIONS.INVOICE_UPDATE,

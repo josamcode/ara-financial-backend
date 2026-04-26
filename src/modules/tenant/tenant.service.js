@@ -1,6 +1,10 @@
 'use strict';
 
 const Tenant = require('./tenant.model');
+const currencyService = require('../currency/currency.service');
+const { JournalEntry } = require('../journal/journal.model');
+const { Invoice } = require('../invoice/invoice.model');
+const { Bill } = require('../bill/bill.model');
 const auditService = require('../audit/audit.service');
 const { BadRequestError, NotFoundError } = require('../../common/errors');
 const { deleteTenantLogo, uploadTenantLogo } = require('../../config/cloudinary');
@@ -113,6 +117,49 @@ class TenantService {
   }
 
   /**
+   * Update tenant base currency only while the tenant has no accounting activity.
+   */
+  async updateBaseCurrency(tenantId, baseCurrency, options = {}) {
+    const tenant = await Tenant.findById(tenantId);
+    if (!tenant) throw new NotFoundError('Tenant not found');
+
+    const currency = await currencyService.requireActiveCurrency(baseCurrency);
+    const normalizedBaseCurrency = currency.code;
+    const currentBaseCurrency = (tenant.baseCurrency || 'SAR').toUpperCase();
+
+    if (currentBaseCurrency === normalizedBaseCurrency) {
+      return tenant;
+    }
+
+    if (await this._hasAccountingActivity(tenantId)) {
+      throw new BadRequestError(
+        'Base currency cannot be changed after accounting activity exists',
+        'BASE_CURRENCY_LOCKED'
+      );
+    }
+
+    const oldValues = { baseCurrency: tenant.baseCurrency || null };
+    tenant.baseCurrency = normalizedBaseCurrency;
+    await tenant.save();
+
+    if (options.userId) {
+      await auditService.log({
+        tenantId,
+        userId: options.userId,
+        action: 'tenant.base_currency_updated',
+        resourceType: 'Tenant',
+        resourceId: tenant._id,
+        oldValues,
+        newValues: { baseCurrency: tenant.baseCurrency },
+        auditContext: options.auditContext,
+      });
+    }
+
+    logger.info({ tenantId, baseCurrency: tenant.baseCurrency }, 'Tenant base currency updated');
+    return tenant;
+  }
+
+  /**
    * Upload and persist tenant logo.
    */
   async uploadLogo(tenantId, file, options = {}) {
@@ -179,6 +226,16 @@ class TenantService {
 
     logger.info({ tenantId }, 'Tenant setup completed');
     return tenant;
+  }
+
+  async _hasAccountingActivity(tenantId) {
+    const [journalEntries, invoices, bills] = await Promise.all([
+      JournalEntry.countDocuments({ tenantId }).setOptions({ __includeDeleted: true }),
+      Invoice.countDocuments({ tenantId }).setOptions({ __includeDeleted: true }),
+      Bill.countDocuments({ tenantId }).setOptions({ __includeDeleted: true }),
+    ]);
+
+    return journalEntries > 0 || invoices > 0 || bills > 0;
   }
 }
 
