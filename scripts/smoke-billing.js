@@ -7,6 +7,18 @@
  * only when you intentionally want to exercise the real payment gateway checkout.
  */
 
+const {
+  configureSafeTestEnvironment,
+  printSafeTestEnvironmentError,
+} = require('./safe-test-env');
+
+try {
+  configureSafeTestEnvironment();
+} catch (error) {
+  printSafeTestEnvironmentError(error);
+  process.exit(1);
+}
+
 const mongoose = require('mongoose');
 const { connectDatabase, disconnectDatabase } = require('../src/config/database');
 const { disconnectRedis } = require('../src/config/redis');
@@ -472,8 +484,6 @@ async function runOptionalProviderCheckout(tenant, userId) {
 }
 
 async function main() {
-  assertSafeSmokeEnvironment(process.env);
-
   await connectDatabase();
 
   let tenant;
@@ -493,100 +503,6 @@ async function main() {
   if (failed > 0) {
     process.exitCode = 1;
   }
-}
-
-function assertSafeSmokeEnvironment(env) {
-  const errors = [];
-  const mongoUri = env.MONGODB_URI;
-
-  if (env.NODE_ENV === 'production') {
-    errors.push('NODE_ENV=production is not allowed for billing smoke.');
-  }
-
-  if (!mongoUri) {
-    errors.push('MONGODB_URI is required for billing smoke.');
-  } else {
-    const mongoInfo = parseMongoUri(mongoUri);
-    const dbName = (mongoInfo.dbName || '').toLowerCase();
-
-    if (!/^mongodb(\+srv)?:\/\//i.test(mongoUri)) {
-      errors.push('MONGODB_URI must be a MongoDB URI.');
-    }
-
-    if (mongoInfo.protocol === 'mongodb+srv:') {
-      errors.push('Billing smoke refuses mongodb+srv URIs.');
-    }
-
-    if (mongoInfo.hosts.some((host) => host.includes('mongodb.net'))) {
-      errors.push('Billing smoke refuses Atlas mongodb.net hosts.');
-    }
-
-    if (mongoInfo.hosts.some((host) => /(^|[.-])(prod|production|live)([.-]|$)/.test(host))) {
-      errors.push(`MongoDB host looks production-like: "${mongoInfo.hosts.join(', ')}".`);
-    }
-
-    if (!mongoInfo.dbName) {
-      errors.push('MONGODB_URI must include an explicit database name.');
-    }
-
-    if (/(^|[_-])(prod|production|live)($|[_-])/.test(dbName)) {
-      errors.push(`MongoDB database name looks production-like: "${mongoInfo.dbName}".`);
-    }
-  }
-
-  if (errors.length === 0) return;
-
-  console.error('Billing smoke safety check failed:');
-  for (const error of errors) {
-    console.error(`- ${error}`);
-  }
-  console.error('Refusing to run billing smoke.');
-  process.exit(1);
-}
-
-function parseMongoUri(uri) {
-  const info = {
-    protocol: null,
-    hosts: [],
-    dbName: '',
-  };
-
-  try {
-    const parsed = new URL(uri);
-    info.protocol = parsed.protocol.toLowerCase();
-    info.hosts = parseHosts(parsed.host);
-    info.dbName = decodeURIComponent(
-      parsed.searchParams.get('dbName') || parsed.pathname.replace(/^\/+/, '').split('/')[0] || ''
-    );
-    return info;
-  } catch {
-    return parseMongoUriFallback(uri, info);
-  }
-}
-
-function parseMongoUriFallback(uri, info) {
-  const query = uri.includes('?') ? uri.slice(uri.indexOf('?') + 1) : '';
-  const dbNameParam = new URLSearchParams(query).get('dbName');
-  const withoutProtocol = uri.replace(/^mongodb(\+srv)?:\/\//i, '');
-  const withoutQuery = withoutProtocol.split(/[?#]/)[0];
-  const withoutCredentials = withoutQuery.includes('@')
-    ? withoutQuery.slice(withoutQuery.lastIndexOf('@') + 1)
-    : withoutQuery;
-  const slashIndex = withoutCredentials.indexOf('/');
-  const hostPart = slashIndex >= 0 ? withoutCredentials.slice(0, slashIndex) : withoutCredentials;
-  const pathPart = slashIndex >= 0 ? withoutCredentials.slice(slashIndex + 1) : '';
-
-  info.protocol = uri.toLowerCase().startsWith('mongodb+srv://') ? 'mongodb+srv:' : 'mongodb:';
-  info.hosts = parseHosts(hostPart);
-  info.dbName = decodeURIComponent(dbNameParam || pathPart.split('/')[0] || '');
-  return info;
-}
-
-function parseHosts(hostPart) {
-  return hostPart
-    .split(',')
-    .map((host) => host.trim().replace(/^\[/, '').replace(/\]$/, '').split(':')[0].toLowerCase())
-    .filter(Boolean);
 }
 
 main().catch((error) => {

@@ -4,6 +4,7 @@ const { once } = require('events');
 const createApp = require('../../src/app');
 const authService = require('../../src/modules/auth/auth.service');
 const accountService = require('../../src/modules/account/account.service');
+const billingService = require('../../src/modules/billing/billing.service');
 const fiscalPeriodService = require('../../src/modules/fiscal-period/fiscalPeriod.service');
 const journalService = require('../../src/modules/journal/journal.service');
 const { connectDatabase, disconnectDatabase } = require('../../src/config/database');
@@ -12,6 +13,8 @@ const User = require('../../src/modules/user/user.model');
 const Tenant = require('../../src/modules/tenant/tenant.model');
 const { Role } = require('../../src/modules/auth/role.model');
 const { Account } = require('../../src/modules/account/account.model');
+const { Plan } = require('../../src/modules/billing/plan.model');
+const { TenantSubscription } = require('../../src/modules/billing/tenant-subscription.model');
 const { JournalEntry } = require('../../src/modules/journal/journal.model');
 const JournalCounter = require('../../src/modules/journal/journalCounter.model');
 const { FiscalPeriod } = require('../../src/modules/fiscal-period/fiscalPeriod.model');
@@ -48,6 +51,7 @@ async function cleanupTenantData(tenantIds) {
     await Account.deleteMany({ tenantId });
     await FiscalPeriod.deleteMany({ tenantId });
     await JournalCounter.deleteMany({ tenantId });
+    await TenantSubscription.deleteMany({ tenantId });
     await AuditLog.collection.deleteMany({ tenantId });
     await User.deleteMany({ tenantId });
     await Role.deleteMany({ tenantId });
@@ -88,10 +92,56 @@ async function createTenantFixture(options = {}) {
     );
   }
 
+  let subscription = null;
+  if (options.createSubscription !== false) {
+    subscription = await createTenantSubscriptionFixture(
+      registration.tenant._id,
+      options.billingPlanCode || 'enterprise',
+      options.subscriptionStatus || 'trialing'
+    );
+  }
+
   return {
     ...registration,
+    subscription,
     auditContext,
   };
+}
+
+async function createTenantSubscriptionFixture(tenantId, planCode, status) {
+  await billingService.ensureDefaultPlans();
+
+  const plan = await Plan.findOne({
+    code: planCode,
+    isActive: true,
+  });
+  if (!plan) {
+    throw new Error(`Billing plan fixture not found: ${planCode}`);
+  }
+
+  const now = new Date();
+  const currentPeriodEnd = new Date(now);
+  currentPeriodEnd.setUTCMonth(currentPeriodEnd.getUTCMonth() + 1);
+
+  return TenantSubscription.findOneAndUpdate(
+    { tenantId },
+    {
+      $set: {
+        planId: plan._id,
+        status,
+        currentPeriodStart: now,
+        currentPeriodEnd,
+        cancelAtPeriodEnd: false,
+      },
+      $setOnInsert: {
+        tenantId,
+      },
+    },
+    {
+      upsert: true,
+      returnDocument: 'after',
+    }
+  ).populate('planId');
 }
 
 async function getAccountsByCode(tenantId, codes) {

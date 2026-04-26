@@ -12,10 +12,24 @@
  * 6. Report correctness
  * 7. Decimal-safe ledger and dashboard views
  *
- * Prerequisites: MongoDB and Redis running locally, .env configured.
+ * Prerequisites: MongoDB and Redis running locally.
+ * Defaults to mongodb://localhost:27017/ara_financial_test unless .env.test
+ * or the shell provides another safe test/dev/ci database URI.
  *
  * Usage: npm run verify
  */
+
+const {
+  configureSafeTestEnvironment,
+  printSafeTestEnvironmentError,
+} = require('./safe-test-env');
+
+try {
+  configureSafeTestEnvironment();
+} catch (error) {
+  printSafeTestEnvironmentError(error);
+  process.exit(1);
+}
 
 const { connectDatabase, disconnectDatabase } = require('../src/config/database');
 const { disconnectRedis } = require('../src/config/redis');
@@ -29,6 +43,7 @@ const journalService = require('../src/modules/journal/journal.service');
 const ledgerService = require('../src/modules/ledger/ledger.service');
 const reportService = require('../src/modules/report/report.service');
 const dashboardService = require('../src/modules/dashboard/dashboard.service');
+const billingService = require('../src/modules/billing/billing.service');
 const fiscalPeriodService = require('../src/modules/fiscal-period/fiscalPeriod.service');
 const tenantService = require('../src/modules/tenant/tenant.service');
 const {
@@ -41,6 +56,8 @@ const User = require('../src/modules/user/user.model');
 const Tenant = require('../src/modules/tenant/tenant.model');
 const { Role } = require('../src/modules/auth/role.model');
 const { Account } = require('../src/modules/account/account.model');
+const { Plan } = require('../src/modules/billing/plan.model');
+const { TenantSubscription } = require('../src/modules/billing/tenant-subscription.model');
 const { JournalEntry } = require('../src/modules/journal/journal.model');
 const JournalCounter = require('../src/modules/journal/journalCounter.model');
 const { FiscalPeriod } = require('../src/modules/fiscal-period/fiscalPeriod.model');
@@ -69,11 +86,48 @@ async function cleanup(tenantIds) {
     await Account.deleteMany({ tenantId });
     await FiscalPeriod.deleteMany({ tenantId });
     await JournalCounter.deleteMany({ tenantId });
+    await TenantSubscription.deleteMany({ tenantId });
     await AuditLog.collection.deleteMany({ tenantId });
     await User.deleteMany({ tenantId });
     await Role.deleteMany({ tenantId });
     await Tenant.findByIdAndDelete(tenantId);
   }
+}
+
+async function ensureVerificationSubscription(tenantId) {
+  await billingService.ensureDefaultPlans();
+
+  const plan = await Plan.findOne({
+    code: 'enterprise',
+    isActive: true,
+  });
+  if (!plan) {
+    throw new Error('Enterprise billing plan fixture not found');
+  }
+
+  const now = new Date();
+  const currentPeriodEnd = new Date(now);
+  currentPeriodEnd.setUTCMonth(currentPeriodEnd.getUTCMonth() + 1);
+
+  return TenantSubscription.findOneAndUpdate(
+    { tenantId },
+    {
+      $set: {
+        planId: plan._id,
+        status: 'trialing',
+        currentPeriodStart: now,
+        currentPeriodEnd,
+        cancelAtPeriodEnd: false,
+      },
+      $setOnInsert: {
+        tenantId,
+      },
+    },
+    {
+      upsert: true,
+      returnDocument: 'after',
+    }
+  );
 }
 
 async function run() {
@@ -104,6 +158,7 @@ async function run() {
       companyName: 'Tenant A Corp',
     }, { auditContext: auditContextA });
     tenantIds.push(tenantA.tenant._id);
+    await ensureVerificationSubscription(tenantA.tenant._id);
 
     assert(
       tenantA.user && tenantA.tenant && tenantA.accessToken,
@@ -121,6 +176,7 @@ async function run() {
       companyName: 'Tenant B Corp',
     }, { auditContext: auditContextB });
     tenantIds.push(tenantB.tenant._id);
+    await ensureVerificationSubscription(tenantB.tenant._id);
 
     assert(
       tenantA.tenant._id.toString() !== tenantB.tenant._id.toString(),
@@ -212,6 +268,7 @@ async function run() {
       companyName: `Template Rollback Tenant ${unique}`,
     }, { auditContext: auditContextA });
     tenantIds.push(templateRollbackTenant.tenant._id);
+    await ensureVerificationSubscription(templateRollbackTenant.tenant._id);
 
     const originalBulkWrite = Account.bulkWrite.bind(Account);
     let templateFailureInjected = false;
@@ -877,8 +934,9 @@ async function run() {
 
     const trialBalance = await reportService.getTrialBalance(tenantA.tenant._id, {});
     assert(trialBalance.totals.isBalanced, 'Trial balance stays balanced');
+    const trialBalanceDifference = toScaledInteger(trialBalance.totals.difference || '0');
     assert(
-      trialBalance.totals.difference === '0.00',
+      trialBalanceDifference === 0n,
       `Trial balance difference is ${trialBalance.totals.difference}`
     );
 
