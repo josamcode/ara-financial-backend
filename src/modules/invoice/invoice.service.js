@@ -15,6 +15,10 @@ const { BadRequestError, NotFoundError } = require('../../common/errors');
 const logger = require('../../config/logger');
 const { MONEY_FACTOR, toScaledInteger } = require('../../common/utils/money');
 const {
+  calculateBaseTotals,
+  resolveDocumentCurrencySnapshot,
+} = require('../currency/currency-snapshot');
+const {
   buildInvoiceStatusFilter,
   COLLECTIBLE_INVOICE_STATUSES,
 } = require('./invoice-status');
@@ -40,31 +44,49 @@ class InvoiceService {
       issueDate: data.issueDate,
       dueDate: data.dueDate,
       currency: data.currency,
+      documentCurrency: data.documentCurrency,
+      exchangeRate: data.exchangeRate,
+      exchangeRateDate: data.exchangeRateDate,
+      exchangeRateSource: data.exchangeRateSource,
+      exchangeRateProvider: data.exchangeRateProvider,
+      isExchangeRateManualOverride: data.isExchangeRateManualOverride,
       lineItems: data.lineItems,
       subtotal: data.subtotal,
       taxTotal: data.taxTotal,
       total: data.total,
       notes: data.notes,
     }));
-    this._assertValidDraftInvoice(draftInvoice);
+    const currencySnapshot = await resolveDocumentCurrencySnapshot(tenantId, draftInvoice);
+    const calculatedInvoice = this._applyCurrencySnapshot(draftInvoice, currencySnapshot);
+    this._assertValidDraftInvoice(calculatedInvoice);
 
     const invoice = await Invoice.create({
       tenantId,
       invoiceNumber,
-      customerId: draftInvoice.customerId || null,
-      customerName: draftInvoice.customerName,
-      customerEmail: draftInvoice.customerEmail,
-      issueDate: draftInvoice.issueDate,
-      dueDate: draftInvoice.dueDate,
-      currency: draftInvoice.currency,
-      lineItems: this._buildLineItems(draftInvoice.lineItems),
-      subtotal: mongoose.Types.Decimal128.fromString(draftInvoice.subtotal),
-      taxTotal: mongoose.Types.Decimal128.fromString(draftInvoice.taxTotal),
-      total: mongoose.Types.Decimal128.fromString(draftInvoice.total),
+      customerId: calculatedInvoice.customerId || null,
+      customerName: calculatedInvoice.customerName,
+      customerEmail: calculatedInvoice.customerEmail,
+      issueDate: calculatedInvoice.issueDate,
+      dueDate: calculatedInvoice.dueDate,
+      currency: calculatedInvoice.currency,
+      documentCurrency: calculatedInvoice.documentCurrency,
+      baseCurrency: calculatedInvoice.baseCurrency,
+      exchangeRate: mongoose.Types.Decimal128.fromString(calculatedInvoice.exchangeRate),
+      exchangeRateDate: calculatedInvoice.exchangeRateDate,
+      exchangeRateSource: calculatedInvoice.exchangeRateSource,
+      exchangeRateProvider: calculatedInvoice.exchangeRateProvider,
+      isExchangeRateManualOverride: calculatedInvoice.isExchangeRateManualOverride,
+      lineItems: this._buildLineItems(calculatedInvoice.lineItems),
+      subtotal: mongoose.Types.Decimal128.fromString(calculatedInvoice.subtotal),
+      taxTotal: mongoose.Types.Decimal128.fromString(calculatedInvoice.taxTotal),
+      total: mongoose.Types.Decimal128.fromString(calculatedInvoice.total),
+      baseSubtotal: mongoose.Types.Decimal128.fromString(calculatedInvoice.baseSubtotal),
+      baseTaxTotal: mongoose.Types.Decimal128.fromString(calculatedInvoice.baseTaxTotal),
+      baseTotal: mongoose.Types.Decimal128.fromString(calculatedInvoice.baseTotal),
       paidAmount: 0,
-      remainingAmount: Number(draftInvoice.total),
+      remainingAmount: Number(calculatedInvoice.total),
       payments: [],
-      notes: draftInvoice.notes,
+      notes: calculatedInvoice.notes,
       status: 'draft',
       createdBy: userId,
     });
@@ -75,7 +97,7 @@ class InvoiceService {
       action: 'invoice.created',
       resourceType: 'Invoice',
       resourceId: invoice._id,
-      newValues: { invoiceNumber, customerName: draftInvoice.customerName },
+      newValues: { invoiceNumber, customerName: calculatedInvoice.customerName },
       auditContext: options.auditContext,
     });
 
@@ -183,28 +205,46 @@ class InvoiceService {
       customerEmail,
       issueDate: data.issueDate ?? invoice.issueDate,
       dueDate: data.dueDate ?? invoice.dueDate,
-      currency: data.currency ?? invoice.currency,
+      currency: data.currency,
+      documentCurrency: data.documentCurrency,
+      exchangeRate: data.exchangeRate,
+      exchangeRateDate: data.exchangeRateDate,
+      exchangeRateSource: data.exchangeRateSource,
+      exchangeRateProvider: data.exchangeRateProvider,
+      isExchangeRateManualOverride: data.isExchangeRateManualOverride,
       lineItems: data.lineItems ?? this._serializeLineItems(invoice.lineItems),
       subtotal: data.subtotal ?? invoice.subtotal,
       taxTotal: data.taxTotal ?? invoice.taxTotal,
       total: data.total ?? invoice.total,
       notes: data.notes !== undefined ? data.notes : invoice.notes,
     }));
-    this._assertValidDraftInvoice(draftInvoice);
+    const currencySnapshot = await resolveDocumentCurrencySnapshot(tenantId, draftInvoice, invoice);
+    const calculatedInvoice = this._applyCurrencySnapshot(draftInvoice, currencySnapshot);
+    this._assertValidDraftInvoice(calculatedInvoice);
 
-    invoice.customerId = draftInvoice.customerId || null;
-    invoice.customerName = draftInvoice.customerName;
-    invoice.customerEmail = draftInvoice.customerEmail;
-    invoice.issueDate = draftInvoice.issueDate;
-    invoice.dueDate = draftInvoice.dueDate;
-    invoice.currency = draftInvoice.currency;
-    invoice.notes = draftInvoice.notes;
-    invoice.lineItems = this._buildLineItems(draftInvoice.lineItems);
-    invoice.subtotal = mongoose.Types.Decimal128.fromString(draftInvoice.subtotal);
-    invoice.taxTotal = mongoose.Types.Decimal128.fromString(draftInvoice.taxTotal);
-    invoice.total = mongoose.Types.Decimal128.fromString(draftInvoice.total);
+    invoice.customerId = calculatedInvoice.customerId || null;
+    invoice.customerName = calculatedInvoice.customerName;
+    invoice.customerEmail = calculatedInvoice.customerEmail;
+    invoice.issueDate = calculatedInvoice.issueDate;
+    invoice.dueDate = calculatedInvoice.dueDate;
+    invoice.currency = calculatedInvoice.currency;
+    invoice.documentCurrency = calculatedInvoice.documentCurrency;
+    invoice.baseCurrency = calculatedInvoice.baseCurrency;
+    invoice.exchangeRate = mongoose.Types.Decimal128.fromString(calculatedInvoice.exchangeRate);
+    invoice.exchangeRateDate = calculatedInvoice.exchangeRateDate;
+    invoice.exchangeRateSource = calculatedInvoice.exchangeRateSource;
+    invoice.exchangeRateProvider = calculatedInvoice.exchangeRateProvider;
+    invoice.isExchangeRateManualOverride = calculatedInvoice.isExchangeRateManualOverride;
+    invoice.notes = calculatedInvoice.notes;
+    invoice.lineItems = this._buildLineItems(calculatedInvoice.lineItems);
+    invoice.subtotal = mongoose.Types.Decimal128.fromString(calculatedInvoice.subtotal);
+    invoice.taxTotal = mongoose.Types.Decimal128.fromString(calculatedInvoice.taxTotal);
+    invoice.total = mongoose.Types.Decimal128.fromString(calculatedInvoice.total);
+    invoice.baseSubtotal = mongoose.Types.Decimal128.fromString(calculatedInvoice.baseSubtotal);
+    invoice.baseTaxTotal = mongoose.Types.Decimal128.fromString(calculatedInvoice.baseTaxTotal);
+    invoice.baseTotal = mongoose.Types.Decimal128.fromString(calculatedInvoice.baseTotal);
     invoice.paidAmount = 0;
-    invoice.remainingAmount = Number(draftInvoice.total);
+    invoice.remainingAmount = Number(calculatedInvoice.total);
 
     await invoice.save();
 
@@ -489,6 +529,15 @@ class InvoiceService {
       taxRate: mongoose.Types.Decimal128.fromString(this._moneyToString(item.taxRate || '0')),
       taxAmount: mongoose.Types.Decimal128.fromString(this._moneyToString(item.taxAmount || '0')),
       lineTotal: mongoose.Types.Decimal128.fromString(this._moneyToString(item.lineTotal)),
+      lineBaseSubtotal: mongoose.Types.Decimal128.fromString(
+        this._moneyToString(item.lineBaseSubtotal || '0')
+      ),
+      lineBaseTaxAmount: mongoose.Types.Decimal128.fromString(
+        this._moneyToString(item.lineBaseTaxAmount || '0')
+      ),
+      lineBaseTotal: mongoose.Types.Decimal128.fromString(
+        this._moneyToString(item.lineBaseTotal || '0')
+      ),
     }));
   }
 
@@ -502,6 +551,9 @@ class InvoiceService {
       taxRate: this._moneyToString(item.taxRate || '0'),
       taxAmount: this._moneyToString(item.taxAmount || '0'),
       lineTotal: this._moneyToString(item.lineTotal),
+      lineBaseSubtotal: this._moneyToString(item.lineBaseSubtotal || '0'),
+      lineBaseTaxAmount: this._moneyToString(item.lineBaseTaxAmount || '0'),
+      lineBaseTotal: this._moneyToString(item.lineBaseTotal || '0'),
     }));
   }
 
@@ -512,7 +564,13 @@ class InvoiceService {
       customerEmail: data.customerEmail || '',
       issueDate: data.issueDate instanceof Date ? data.issueDate : new Date(data.issueDate),
       dueDate: data.dueDate instanceof Date ? data.dueDate : new Date(data.dueDate),
-      currency: data.currency || 'EGP',
+      currency: data.currency || '',
+      documentCurrency: data.documentCurrency || '',
+      exchangeRate: data.exchangeRate,
+      exchangeRateDate: data.exchangeRateDate,
+      exchangeRateSource: data.exchangeRateSource,
+      exchangeRateProvider: data.exchangeRateProvider,
+      isExchangeRateManualOverride: data.isExchangeRateManualOverride,
       lineItems: Array.isArray(data.lineItems)
         ? data.lineItems.map((item) => ({
           description: item.description,
@@ -529,6 +587,19 @@ class InvoiceService {
       taxTotal: this._moneyToString(data.taxTotal || '0'),
       total: this._moneyToString(data.total),
       notes: data.notes || '',
+    };
+  }
+
+  _applyCurrencySnapshot(invoice, snapshot) {
+    const baseTotals = calculateBaseTotals(invoice.lineItems, snapshot.exchangeRate);
+
+    return {
+      ...invoice,
+      ...snapshot,
+      lineItems: baseTotals.lineItems,
+      baseSubtotal: baseTotals.baseSubtotal,
+      baseTaxTotal: baseTotals.baseTaxTotal,
+      baseTotal: baseTotals.baseTotal,
     };
   }
 

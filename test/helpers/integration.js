@@ -5,6 +5,7 @@ const createApp = require('../../src/app');
 const authService = require('../../src/modules/auth/auth.service');
 const accountService = require('../../src/modules/account/account.service');
 const billingService = require('../../src/modules/billing/billing.service');
+const currencyService = require('../../src/modules/currency/currency.service');
 const fiscalPeriodService = require('../../src/modules/fiscal-period/fiscalPeriod.service');
 const journalService = require('../../src/modules/journal/journal.service');
 const { connectDatabase, disconnectDatabase } = require('../../src/config/database');
@@ -72,6 +73,8 @@ async function cleanupTenantData(tenantIds) {
 }
 
 async function createTenantFixture(options = {}) {
+  await currencyService.seedDefaultCurrencies();
+
   const suffix = options.suffix || uniqueSuffix();
   const auditContext = options.auditContext || {
     ip: '127.0.0.1',

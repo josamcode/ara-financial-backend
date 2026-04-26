@@ -9,6 +9,7 @@ const {
   resolveBillStatus,
   resolveBillTotalAmount,
 } = require('./bill-status');
+const { EXCHANGE_RATE_SOURCES } = require('../currency/currency-snapshot');
 
 const BILL_STATUSES = ['draft', 'posted', 'partially_paid', 'paid', 'overdue', 'cancelled'];
 
@@ -35,6 +36,18 @@ const lineItemSchema = new mongoose.Schema(
       default: mongoose.Types.Decimal128.fromString('0'),
     },
     lineTotal: { type: mongoose.Schema.Types.Decimal128, required: true },
+    lineBaseSubtotal: {
+      type: mongoose.Schema.Types.Decimal128,
+      default: mongoose.Types.Decimal128.fromString('0'),
+    },
+    lineBaseTaxAmount: {
+      type: mongoose.Schema.Types.Decimal128,
+      default: mongoose.Types.Decimal128.fromString('0'),
+    },
+    lineBaseTotal: {
+      type: mongoose.Schema.Types.Decimal128,
+      default: mongoose.Types.Decimal128.fromString('0'),
+    },
   },
   { _id: true }
 );
@@ -66,7 +79,56 @@ const billSchema = new mongoose.Schema(
     issueDate: { type: Date, required: true },
     dueDate: { type: Date, required: true },
     status: { type: String, enum: BILL_STATUSES, default: 'draft' },
-    currency: { type: String, default: 'EGP', maxlength: 10 },
+    currency: { type: String, default: 'SAR', maxlength: 10 },
+    documentCurrency: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      minlength: 3,
+      maxlength: 3,
+      match: [/^[A-Z]{3}$/, 'Document currency must be a 3-letter ISO code'],
+      default() {
+        return this.currency || this.baseCurrency || 'SAR';
+      },
+    },
+    baseCurrency: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      minlength: 3,
+      maxlength: 3,
+      match: [/^[A-Z]{3}$/, 'Base currency must be a 3-letter ISO code'],
+      default: 'SAR',
+    },
+    exchangeRate: {
+      type: mongoose.Schema.Types.Decimal128,
+      default: mongoose.Types.Decimal128.fromString('1'),
+      validate: {
+        validator(value) {
+          const numeric = Number(value?.toString?.() ?? value);
+          return Number.isFinite(numeric) && numeric > 0;
+        },
+        message: 'Exchange rate must be greater than zero',
+      },
+    },
+    exchangeRateDate: {
+      type: Date,
+      default() {
+        return this.issueDate || new Date();
+      },
+    },
+    exchangeRateSource: {
+      type: String,
+      enum: EXCHANGE_RATE_SOURCES,
+      default: 'company_rate',
+    },
+    exchangeRateProvider: {
+      type: String,
+      trim: true,
+      maxlength: 100,
+      default: null,
+    },
+    isExchangeRateManualOverride: { type: Boolean, default: false },
     lineItems: { type: [lineItemSchema], default: [] },
     subtotal: { type: mongoose.Schema.Types.Decimal128, required: true },
     taxTotal: {
@@ -74,6 +136,18 @@ const billSchema = new mongoose.Schema(
       default: mongoose.Types.Decimal128.fromString('0'),
     },
     total: { type: mongoose.Schema.Types.Decimal128, required: true },
+    baseSubtotal: {
+      type: mongoose.Schema.Types.Decimal128,
+      default: mongoose.Types.Decimal128.fromString('0'),
+    },
+    baseTaxTotal: {
+      type: mongoose.Schema.Types.Decimal128,
+      default: mongoose.Types.Decimal128.fromString('0'),
+    },
+    baseTotal: {
+      type: mongoose.Schema.Types.Decimal128,
+      default: mongoose.Types.Decimal128.fromString('0'),
+    },
     paidAmount: { type: Number, default: 0 },
     remainingAmount: {
       type: Number,
@@ -109,9 +183,20 @@ const billSchema = new mongoose.Schema(
       transform(_doc, ret) {
         const dec = (value) => (value ? value.toString() : '0');
 
+        ret.documentCurrency = ret.documentCurrency || ret.currency || ret.baseCurrency || 'SAR';
+        ret.baseCurrency = ret.baseCurrency || 'SAR';
         ret.subtotal = dec(ret.subtotal);
         ret.taxTotal = dec(ret.taxTotal);
         ret.total = dec(ret.total);
+        ret.exchangeRate = ret.exchangeRate
+          ? ret.exchangeRate.toString()
+          : ret.documentCurrency === ret.baseCurrency
+            ? '1'
+            : '0';
+        const sameCurrency = ret.documentCurrency === ret.baseCurrency;
+        ret.baseSubtotal = ret.baseSubtotal ? dec(ret.baseSubtotal) : sameCurrency ? ret.subtotal : '0';
+        ret.baseTaxTotal = ret.baseTaxTotal ? dec(ret.baseTaxTotal) : sameCurrency ? ret.taxTotal : '0';
+        ret.baseTotal = ret.baseTotal ? dec(ret.baseTotal) : sameCurrency ? ret.total : '0';
         const totalAmount = resolveBillTotalAmount(ret);
         ret.paidAmount = resolveBillPaidAmount(ret, totalAmount);
         ret.remainingAmount = resolveBillRemainingAmount(ret, totalAmount, ret.paidAmount);
@@ -126,6 +211,21 @@ const billSchema = new mongoose.Schema(
             taxRate: dec(item.taxRate),
             taxAmount: dec(item.taxAmount),
             lineTotal: dec(item.lineTotal),
+            lineBaseSubtotal: item.lineBaseSubtotal
+              ? dec(item.lineBaseSubtotal)
+              : sameCurrency
+                ? dec(item.lineSubtotal || item.lineTotal)
+                : '0',
+            lineBaseTaxAmount: item.lineBaseTaxAmount
+              ? dec(item.lineBaseTaxAmount)
+              : sameCurrency
+                ? dec(item.taxAmount)
+                : '0',
+            lineBaseTotal: item.lineBaseTotal
+              ? dec(item.lineBaseTotal)
+              : sameCurrency
+                ? dec(item.lineTotal)
+                : '0',
           }));
         }
 

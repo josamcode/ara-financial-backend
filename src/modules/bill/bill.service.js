@@ -11,6 +11,10 @@ const { BadRequestError, NotFoundError } = require('../../common/errors');
 const logger = require('../../config/logger');
 const { MONEY_FACTOR, toScaledInteger } = require('../../common/utils/money');
 const {
+  calculateBaseTotals,
+  resolveDocumentCurrencySnapshot,
+} = require('../currency/currency-snapshot');
+const {
   buildBillStatusFilter,
   PAYABLE_BILL_STATUSES,
   resolveBillPaidAmount,
@@ -38,31 +42,49 @@ class BillService {
       issueDate: data.issueDate,
       dueDate: data.dueDate,
       currency: data.currency,
+      documentCurrency: data.documentCurrency,
+      exchangeRate: data.exchangeRate,
+      exchangeRateDate: data.exchangeRateDate,
+      exchangeRateSource: data.exchangeRateSource,
+      exchangeRateProvider: data.exchangeRateProvider,
+      isExchangeRateManualOverride: data.isExchangeRateManualOverride,
       lineItems: data.lineItems,
       subtotal: data.subtotal,
       taxTotal: data.taxTotal,
       total: data.total,
       notes: data.notes,
     }));
-    this._assertValidDraftBill(draftBill);
+    const currencySnapshot = await resolveDocumentCurrencySnapshot(tenantId, draftBill);
+    const calculatedBill = this._applyCurrencySnapshot(draftBill, currencySnapshot);
+    this._assertValidDraftBill(calculatedBill);
 
     const bill = await Bill.create({
       tenantId,
       billNumber,
-      supplierId: draftBill.supplierId || null,
-      supplierName: draftBill.supplierName,
-      supplierEmail: draftBill.supplierEmail,
-      issueDate: draftBill.issueDate,
-      dueDate: draftBill.dueDate,
-      currency: draftBill.currency,
-      lineItems: this._buildLineItems(draftBill.lineItems),
-      subtotal: mongoose.Types.Decimal128.fromString(draftBill.subtotal),
-      taxTotal: mongoose.Types.Decimal128.fromString(draftBill.taxTotal),
-      total: mongoose.Types.Decimal128.fromString(draftBill.total),
+      supplierId: calculatedBill.supplierId || null,
+      supplierName: calculatedBill.supplierName,
+      supplierEmail: calculatedBill.supplierEmail,
+      issueDate: calculatedBill.issueDate,
+      dueDate: calculatedBill.dueDate,
+      currency: calculatedBill.currency,
+      documentCurrency: calculatedBill.documentCurrency,
+      baseCurrency: calculatedBill.baseCurrency,
+      exchangeRate: mongoose.Types.Decimal128.fromString(calculatedBill.exchangeRate),
+      exchangeRateDate: calculatedBill.exchangeRateDate,
+      exchangeRateSource: calculatedBill.exchangeRateSource,
+      exchangeRateProvider: calculatedBill.exchangeRateProvider,
+      isExchangeRateManualOverride: calculatedBill.isExchangeRateManualOverride,
+      lineItems: this._buildLineItems(calculatedBill.lineItems),
+      subtotal: mongoose.Types.Decimal128.fromString(calculatedBill.subtotal),
+      taxTotal: mongoose.Types.Decimal128.fromString(calculatedBill.taxTotal),
+      total: mongoose.Types.Decimal128.fromString(calculatedBill.total),
+      baseSubtotal: mongoose.Types.Decimal128.fromString(calculatedBill.baseSubtotal),
+      baseTaxTotal: mongoose.Types.Decimal128.fromString(calculatedBill.baseTaxTotal),
+      baseTotal: mongoose.Types.Decimal128.fromString(calculatedBill.baseTotal),
       paidAmount: 0,
-      remainingAmount: Number(draftBill.total),
+      remainingAmount: Number(calculatedBill.total),
       payments: [],
-      notes: draftBill.notes,
+      notes: calculatedBill.notes,
       status: 'draft',
       createdBy: userId,
     });
@@ -150,6 +172,95 @@ class BillService {
       });
 
     if (!bill) throw new NotFoundError('Bill not found');
+    return bill;
+  }
+
+  async updateBill(billId, tenantId, userId, data, options = {}) {
+    const bill = await Bill.findOne({ _id: billId, tenantId });
+    if (!bill) throw new NotFoundError('Bill not found');
+    if (bill.status !== 'draft') {
+      throw new BadRequestError('Only draft bills can be edited');
+    }
+
+    let supplierId = bill.supplierId ? bill.supplierId.toString() : null;
+    let supplierName = bill.supplierName;
+    let supplierEmail = bill.supplierEmail || '';
+
+    if (data.supplierId !== undefined) {
+      if (data.supplierId) {
+        const supplier = await this._resolveSupplier(tenantId, data.supplierId);
+        supplierId = supplier._id.toString();
+        supplierName = supplier.name;
+        supplierEmail = supplier.email || supplierEmail;
+      } else {
+        supplierId = null;
+        if (data.supplierName !== undefined) supplierName = data.supplierName;
+        if (data.supplierEmail !== undefined) supplierEmail = data.supplierEmail;
+      }
+    } else {
+      if (data.supplierName !== undefined) supplierName = data.supplierName;
+      if (data.supplierEmail !== undefined) supplierEmail = data.supplierEmail;
+    }
+
+    const draftBill = await this._calculateDraftBill(tenantId, this._normalizeDraftBillInput({
+      supplierId,
+      supplierName,
+      supplierEmail,
+      issueDate: data.issueDate ?? bill.issueDate,
+      dueDate: data.dueDate ?? bill.dueDate,
+      currency: data.currency,
+      documentCurrency: data.documentCurrency,
+      exchangeRate: data.exchangeRate,
+      exchangeRateDate: data.exchangeRateDate,
+      exchangeRateSource: data.exchangeRateSource,
+      exchangeRateProvider: data.exchangeRateProvider,
+      isExchangeRateManualOverride: data.isExchangeRateManualOverride,
+      lineItems: data.lineItems ?? this._serializeLineItems(bill.lineItems),
+      subtotal: data.subtotal ?? bill.subtotal,
+      taxTotal: data.taxTotal ?? bill.taxTotal,
+      total: data.total ?? bill.total,
+      notes: data.notes !== undefined ? data.notes : bill.notes,
+    }));
+    const currencySnapshot = await resolveDocumentCurrencySnapshot(tenantId, draftBill, bill);
+    const calculatedBill = this._applyCurrencySnapshot(draftBill, currencySnapshot);
+    this._assertValidDraftBill(calculatedBill);
+
+    bill.supplierId = calculatedBill.supplierId || null;
+    bill.supplierName = calculatedBill.supplierName;
+    bill.supplierEmail = calculatedBill.supplierEmail;
+    bill.issueDate = calculatedBill.issueDate;
+    bill.dueDate = calculatedBill.dueDate;
+    bill.currency = calculatedBill.currency;
+    bill.documentCurrency = calculatedBill.documentCurrency;
+    bill.baseCurrency = calculatedBill.baseCurrency;
+    bill.exchangeRate = mongoose.Types.Decimal128.fromString(calculatedBill.exchangeRate);
+    bill.exchangeRateDate = calculatedBill.exchangeRateDate;
+    bill.exchangeRateSource = calculatedBill.exchangeRateSource;
+    bill.exchangeRateProvider = calculatedBill.exchangeRateProvider;
+    bill.isExchangeRateManualOverride = calculatedBill.isExchangeRateManualOverride;
+    bill.notes = calculatedBill.notes;
+    bill.lineItems = this._buildLineItems(calculatedBill.lineItems);
+    bill.subtotal = mongoose.Types.Decimal128.fromString(calculatedBill.subtotal);
+    bill.taxTotal = mongoose.Types.Decimal128.fromString(calculatedBill.taxTotal);
+    bill.total = mongoose.Types.Decimal128.fromString(calculatedBill.total);
+    bill.baseSubtotal = mongoose.Types.Decimal128.fromString(calculatedBill.baseSubtotal);
+    bill.baseTaxTotal = mongoose.Types.Decimal128.fromString(calculatedBill.baseTaxTotal);
+    bill.baseTotal = mongoose.Types.Decimal128.fromString(calculatedBill.baseTotal);
+    bill.paidAmount = 0;
+    bill.remainingAmount = Number(calculatedBill.total);
+
+    await bill.save();
+
+    await auditService.log({
+      tenantId,
+      userId,
+      action: 'bill.updated',
+      resourceType: 'Bill',
+      resourceId: bill._id,
+      newValues: { billNumber: bill.billNumber },
+      auditContext: options.auditContext,
+    });
+
     return bill;
   }
 
@@ -370,6 +481,15 @@ class BillService {
       taxRate: mongoose.Types.Decimal128.fromString(this._moneyToString(item.taxRate || '0')),
       taxAmount: mongoose.Types.Decimal128.fromString(this._moneyToString(item.taxAmount || '0')),
       lineTotal: mongoose.Types.Decimal128.fromString(this._moneyToString(item.lineTotal)),
+      lineBaseSubtotal: mongoose.Types.Decimal128.fromString(
+        this._moneyToString(item.lineBaseSubtotal || '0')
+      ),
+      lineBaseTaxAmount: mongoose.Types.Decimal128.fromString(
+        this._moneyToString(item.lineBaseTaxAmount || '0')
+      ),
+      lineBaseTotal: mongoose.Types.Decimal128.fromString(
+        this._moneyToString(item.lineBaseTotal || '0')
+      ),
     }));
   }
 
@@ -383,6 +503,9 @@ class BillService {
       taxRate: this._moneyToString(item.taxRate || '0'),
       taxAmount: this._moneyToString(item.taxAmount || '0'),
       lineTotal: this._moneyToString(item.lineTotal),
+      lineBaseSubtotal: this._moneyToString(item.lineBaseSubtotal || '0'),
+      lineBaseTaxAmount: this._moneyToString(item.lineBaseTaxAmount || '0'),
+      lineBaseTotal: this._moneyToString(item.lineBaseTotal || '0'),
     }));
   }
 
@@ -393,7 +516,13 @@ class BillService {
       supplierEmail: data.supplierEmail || '',
       issueDate: data.issueDate instanceof Date ? data.issueDate : new Date(data.issueDate),
       dueDate: data.dueDate instanceof Date ? data.dueDate : new Date(data.dueDate),
-      currency: data.currency || 'EGP',
+      currency: data.currency || '',
+      documentCurrency: data.documentCurrency || '',
+      exchangeRate: data.exchangeRate,
+      exchangeRateDate: data.exchangeRateDate,
+      exchangeRateSource: data.exchangeRateSource,
+      exchangeRateProvider: data.exchangeRateProvider,
+      isExchangeRateManualOverride: data.isExchangeRateManualOverride,
       lineItems: Array.isArray(data.lineItems)
         ? data.lineItems.map((item) => ({
           description: item.description,
@@ -410,6 +539,19 @@ class BillService {
       taxTotal: this._moneyToString(data.taxTotal || '0'),
       total: this._moneyToString(data.total),
       notes: data.notes || '',
+    };
+  }
+
+  _applyCurrencySnapshot(bill, snapshot) {
+    const baseTotals = calculateBaseTotals(bill.lineItems, snapshot.exchangeRate);
+
+    return {
+      ...bill,
+      ...snapshot,
+      lineItems: baseTotals.lineItems,
+      baseSubtotal: baseTotals.baseSubtotal,
+      baseTaxTotal: baseTotals.baseTaxTotal,
+      baseTotal: baseTotals.baseTotal,
     };
   }
 

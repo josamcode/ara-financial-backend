@@ -137,7 +137,7 @@ async function createBillActivity(fixture) {
 
 test.before(async () => {
   await ensureDatabase();
-  await Currency.deleteMany({ code: { $in: ['SAR', 'USD', 'EGP', 'EUR', 'ABC', 'ZZZ'] } });
+  await Currency.deleteMany({ code: { $in: ['ABC', 'ZZZ'] } });
   await currencyService.seedDefaultCurrencies();
   serverContext = await createServer();
 });

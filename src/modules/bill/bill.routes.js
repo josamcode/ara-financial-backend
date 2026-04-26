@@ -8,6 +8,7 @@ const { authenticate, authorize, tenantContext } = require('../../common/middlew
 const { PERMISSIONS } = require('../auth/role.model');
 const {
   createBillSchema,
+  updateBillSchema,
   postBillSchema,
   recordBillPaymentSchema,
   bulkBillIdsSchema,
@@ -47,6 +48,13 @@ router.get(
   '/:id',
   authorize(PERMISSIONS.BILL_READ),
   asyncHandler(controller.getById)
+);
+
+router.patch(
+  '/:id',
+  authorize(PERMISSIONS.BILL_CREATE),
+  validate({ body: updateBillSchema }),
+  asyncHandler(controller.update)
 );
 
 router.post(

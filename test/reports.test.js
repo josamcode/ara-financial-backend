@@ -107,7 +107,7 @@ test('vat return report aggregates tenant-scoped output and input VAT', async ()
         customerName,
         issueDate,
         dueDate,
-        currency: 'EGP',
+        currency: 'SAR',
         lineItems: [{
           description: 'Taxed sale',
           quantity: '1',
@@ -163,7 +163,7 @@ test('vat return report aggregates tenant-scoped output and input VAT', async ()
         supplierName,
         issueDate,
         dueDate,
-        currency: 'EGP',
+        currency: 'SAR',
         lineItems: [{
           description: 'Taxed purchase',
           quantity: '1',
@@ -236,7 +236,7 @@ test('vat return report aggregates tenant-scoped output and input VAT', async ()
       customerName: 'No Tax Customer',
       issueDate: '2026-04-13',
       dueDate: '2026-04-30',
-      currency: 'EGP',
+      currency: 'SAR',
       lineItems: [{
         description: 'No tax sale',
         quantity: '1',
@@ -291,7 +291,7 @@ test('vat return report aggregates tenant-scoped output and input VAT', async ()
       supplierName: 'No Tax Supplier',
       issueDate: '2026-04-17',
       dueDate: '2026-04-30',
-      currency: 'EGP',
+      currency: 'SAR',
       lineItems: [{
         description: 'No tax purchase',
         quantity: '1',
@@ -544,7 +544,7 @@ test('invoice reads derive overdue status and stay in sync with due-date and pay
       customerEmail: customer.email,
       issueDate,
       dueDate: overdueDueDate.toISOString().slice(0, 10),
-      currency: 'EGP',
+      currency: 'SAR',
       lineItems: [
         {
           description: 'Consulting fee',
@@ -688,7 +688,7 @@ test('ar aging report groups outstanding balances by customer and aging bucket',
         customerEmail: customer.email,
         issueDate,
         dueDate,
-        currency: 'EGP',
+        currency: 'SAR',
         lineItems: [
           {
             description: 'Service line',
@@ -845,7 +845,7 @@ test('supplier statement combines bills and payments into a payable running bala
         supplierEmail: supplier.email,
         issueDate,
         dueDate,
-        currency: 'EGP',
+        currency: 'SAR',
         lineItems: [
           {
             description: 'Expense line',
@@ -1003,7 +1003,7 @@ test('ap aging report groups outstanding balances by supplier and aging bucket',
         supplierEmail: supplier.email,
         issueDate,
         dueDate,
-        currency: 'EGP',
+        currency: 'SAR',
         lineItems: [
           {
             description: 'Expense line',
@@ -1093,7 +1093,7 @@ test('ap aging report groups outstanding balances by supplier and aging bucket',
       supplierEmail: supplierA.email,
       issueDate: '2026-04-05',
       dueDate: '2026-04-12',
-      currency: 'EGP',
+      currency: 'SAR',
       lineItems: [
         {
           description: 'Draft expense line',

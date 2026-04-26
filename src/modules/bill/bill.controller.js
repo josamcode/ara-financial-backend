@@ -98,6 +98,18 @@ class BillController {
     return success(res, { bill });
   }
 
+  async update(req, res) {
+    const auditContext = getAuditContext(req);
+    const bill = await billService.updateBill(
+      req.params.id,
+      req.user.tenantId,
+      req.user.userId,
+      req.body,
+      { auditContext }
+    );
+    return success(res, { bill });
+  }
+
   async post(req, res) {
     const auditContext = getAuditContext(req);
     const bill = await billService.postBill(

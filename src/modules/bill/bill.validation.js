@@ -2,12 +2,36 @@
 
 const { z } = require('zod');
 const { MONEY_FACTOR, toScaledInteger } = require('../../common/utils/money');
+const { EXCHANGE_RATE_SOURCES } = require('../currency/currency-snapshot');
 
 const objectIdPattern = /^[0-9a-fA-F]{24}$/;
+const exchangeRatePattern = /^\d+(\.\d{1,12})?$/;
 
 const monetaryAmount = z
   .string()
   .regex(/^\d+(\.\d{1,6})?$/, 'Must be a valid decimal number');
+
+const currencyCode = z
+  .string()
+  .trim()
+  .regex(/^[A-Za-z]{3}$/, 'Currency code must be a 3-letter ISO code')
+  .transform((value) => value.toUpperCase());
+
+const positiveExchangeRate = z.preprocess((value) => {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value === 'number') return String(value);
+  return value;
+}, z
+  .string()
+  .trim()
+  .regex(exchangeRatePattern, 'Exchange rate must be a valid positive decimal')
+  .refine((value) => Number(value) > 0, 'Exchange rate must be greater than zero')
+  .optional());
+
+const exchangeRateDate = z
+  .string()
+  .trim()
+  .refine((value) => !isNaN(Date.parse(value)), 'Valid date required');
 
 const positiveMonetaryAmount = monetaryAmount.refine(
   (value) => toScaledInteger(value) > 0n,
@@ -109,13 +133,39 @@ const createBillSchema = z.object({
   supplierEmail: z.string().email().optional().or(z.literal('')),
   issueDate: z.string().refine((value) => !isNaN(Date.parse(value)), 'Valid date required'),
   dueDate: z.string().refine((value) => !isNaN(Date.parse(value)), 'Valid date required'),
-  currency: z.string().max(10).optional().default('EGP'),
+  currency: currencyCode.optional(),
+  documentCurrency: currencyCode.optional(),
+  exchangeRate: positiveExchangeRate,
+  exchangeRateDate: exchangeRateDate.optional(),
+  exchangeRateSource: z.enum(EXCHANGE_RATE_SOURCES).optional(),
+  exchangeRateProvider: z.string().trim().max(100).optional().nullable(),
+  isExchangeRateManualOverride: z.boolean().optional(),
   lineItems: z.array(lineItemSchema).min(1, 'At least one line item required'),
   subtotal: nonNegativeMonetaryAmount,
   taxTotal: nonNegativeMonetaryAmount.optional().default('0'),
   total: nonNegativeMonetaryAmount,
   notes: z.string().max(2000).optional().default(''),
 }).superRefine(validateBillAmounts);
+
+const updateBillSchema = z.object({
+  supplierId: z.union([objectId, z.literal('')]).optional().nullable(),
+  supplierName: z.string().min(1).max(200).optional(),
+  supplierEmail: z.string().email().optional().or(z.literal('')),
+  issueDate: z.string().refine((value) => !isNaN(Date.parse(value)), 'Valid date required').optional(),
+  dueDate: z.string().refine((value) => !isNaN(Date.parse(value)), 'Valid date required').optional(),
+  currency: currencyCode.optional(),
+  documentCurrency: currencyCode.optional(),
+  exchangeRate: positiveExchangeRate,
+  exchangeRateDate: exchangeRateDate.optional(),
+  exchangeRateSource: z.enum(EXCHANGE_RATE_SOURCES).optional(),
+  exchangeRateProvider: z.string().trim().max(100).optional().nullable(),
+  isExchangeRateManualOverride: z.boolean().optional(),
+  lineItems: z.array(lineItemSchema).min(1).optional(),
+  subtotal: nonNegativeMonetaryAmount.optional(),
+  taxTotal: nonNegativeMonetaryAmount.optional(),
+  total: nonNegativeMonetaryAmount.optional(),
+  notes: z.string().max(2000).optional(),
+});
 
 const postBillSchema = z.object({
   apAccountId: requiredObjectId('Accounts payable account'),
@@ -134,6 +184,7 @@ const bulkBillIdsSchema = z.object({
 
 module.exports = {
   createBillSchema,
+  updateBillSchema,
   postBillSchema,
   recordBillPaymentSchema,
   bulkBillIdsSchema,
