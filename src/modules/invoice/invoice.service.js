@@ -5,6 +5,7 @@ const { Invoice } = require('./invoice.model');
 const InvoiceCounter = require('./invoiceCounter.model');
 const { Customer } = require('../customer/customer.model');
 const Tenant = require('../tenant/tenant.model');
+const accountService = require('../account/account.service');
 const journalService = require('../journal/journal.service');
 const taxService = require('../tax/tax.service');
 const auditService = require('../audit/audit.service');
@@ -18,6 +19,7 @@ const {
   calculateBaseTotals,
   resolveDocumentCurrencySnapshot,
 } = require('../currency/currency-snapshot');
+const { calculateFxPayment } = require('../currency/fx-payment');
 const {
   buildInvoiceStatusFilter,
   COLLECTIBLE_INVOICE_STATUSES,
@@ -375,12 +377,6 @@ class InvoiceService {
   ) {
     const invoice = await Invoice.findOne({ _id: invoiceId, tenantId });
     if (!invoice) throw new NotFoundError('Invoice not found');
-    if (this._isForeignCurrencyDocument(invoice)) {
-      throw new BadRequestError(
-        'Foreign-currency payments require FX gain/loss handling and are not supported in this version',
-        'FOREIGN_CURRENCY_PAYMENT_UNSUPPORTED'
-      );
-    }
     if (!COLLECTIBLE_INVOICE_STATUSES.includes(invoice.status)) {
       throw new BadRequestError('Only sent, overdue, or partially paid invoices can be paid');
     }
@@ -390,7 +386,16 @@ class InvoiceService {
       throw new BadRequestError('Cash or bank account is required');
     }
     const normalizedPaymentCurrency = this._normalizePaymentCurrency(paymentCurrency, invoice);
-    this._assertSameCurrencyPaymentInput(invoice, normalizedPaymentCurrency, paymentExchangeRate);
+    const isForeignPayment = this._isForeignCurrencyDocument(invoice);
+    if (isForeignPayment) {
+      this._assertForeignCurrencyInvoicePaymentInput(
+        invoice,
+        normalizedPaymentCurrency,
+        paymentExchangeRate
+      );
+    } else {
+      this._assertSameCurrencyPaymentInput(invoice, normalizedPaymentCurrency, paymentExchangeRate);
+    }
 
     const totalAmount = this._roundMonetaryAmount(Number(invoice.total?.toString() ?? 0));
     const paidAmount = this._resolvePaidAmount(invoice, totalAmount);
@@ -409,6 +414,7 @@ class InvoiceService {
     }
 
     const amountStr = paymentAmount.toFixed(6).replace(/\.?0+$/, '');
+    const isFinalPayment = this._amountsEqual(paymentAmount, remainingAmount);
     const date = paymentDate ? new Date(paymentDate) : new Date();
     const exchangeRateDate = paymentExchangeRateDate ? new Date(paymentExchangeRateDate) : date;
     const paymentReference = reference ? String(reference).trim() : '';
@@ -420,6 +426,69 @@ class InvoiceService {
       throw new BadRequestError('Invoice has no stored accounts receivable account');
     }
 
+    let paymentBaseAmount = paymentAmount;
+    let carryingBaseAmount = paymentAmount;
+    let paymentBaseAmountStr = amountStr;
+    let carryingBaseAmountStr = amountStr;
+    let paymentExchangeRateStr = '1';
+    let fxGainLossAmount = 0;
+    let fxGainLossAmountStr = '0';
+    let fxGainLossType = 'none';
+    let lines = [
+      { accountId: paymentAccountId, debit: amountStr, credit: '0', description: paymentDescription },
+      { accountId: arAccountId, debit: '0', credit: amountStr, description: paymentDescription },
+    ];
+
+    if (isForeignPayment) {
+      const fxPayment = calculateFxPayment({
+        documentAmount: amountStr,
+        documentExchangeRate: invoice.exchangeRate,
+        paymentExchangeRate,
+        isFinalPayment,
+        remainingBaseAmount: invoice.remainingBaseAmount,
+      });
+
+      paymentBaseAmount = this._roundMonetaryAmount(Number(fxPayment.paymentBaseAmount));
+      carryingBaseAmount = this._roundMonetaryAmount(Number(fxPayment.carryingBaseAmount));
+      paymentBaseAmountStr = fxPayment.paymentBaseAmount;
+      carryingBaseAmountStr = fxPayment.carryingBaseAmount;
+      paymentExchangeRateStr = this._moneyToString(paymentExchangeRate);
+      fxGainLossAmount = this._roundMonetaryAmount(Number(fxPayment.fxGainLossAmount));
+      fxGainLossAmountStr = fxPayment.fxGainLossAmount;
+      fxGainLossType = fxPayment.fxGainLossType;
+
+      lines = [
+        { accountId: paymentAccountId, debit: paymentBaseAmountStr, credit: '0', description: paymentDescription },
+      ];
+
+      if (fxGainLossType === 'loss') {
+        const fxLossAccount = await accountService.findFxLossAccount(tenantId);
+        lines.push({
+          accountId: fxLossAccount._id.toString(),
+          debit: fxGainLossAmountStr,
+          credit: '0',
+          description: paymentDescription,
+        });
+      }
+
+      lines.push({
+        accountId: arAccountId,
+        debit: '0',
+        credit: carryingBaseAmountStr,
+        description: paymentDescription,
+      });
+
+      if (fxGainLossType === 'gain') {
+        const fxGainAccount = await accountService.findFxGainAccount(tenantId);
+        lines.push({
+          accountId: fxGainAccount._id.toString(),
+          debit: '0',
+          credit: fxGainLossAmountStr,
+          description: paymentDescription,
+        });
+      }
+    }
+
     const entry = await journalService.createEntry(
       tenantId,
       userId,
@@ -428,35 +497,43 @@ class InvoiceService {
         description: `تحصيل فاتورة رقم ${invoice.invoiceNumber} - ${invoice.customerName}`,
         description: paymentDescription,
         reference: invoice.invoiceNumber,
-        lines: [
+        lines: (isForeignPayment ? lines : [
           { accountId: paymentAccountId, debit: amountStr, credit: '0', description: 'تحصيل نقدي' },
           { accountId: arAccountId, debit: '0', credit: amountStr, description: 'ذمم مدينة' },
-        ].map((line) => ({ ...line, description: paymentDescription })),
+        ]).map((line) => ({ ...line, description: paymentDescription })),
       },
       { auditContext: options.auditContext }
     );
 
     await journalService.postEntry(entry._id, tenantId, userId, { auditContext: options.auditContext });
 
-    invoice.paidAmount = this._roundMonetaryAmount(paidAmount + paymentAmount);
-    invoice.remainingAmount = this._roundMonetaryAmount(totalAmount - invoice.paidAmount);
+    invoice.paidAmount = isFinalPayment
+      ? totalAmount
+      : this._roundMonetaryAmount(paidAmount + paymentAmount);
+    invoice.remainingAmount = isFinalPayment
+      ? 0
+      : this._roundMonetaryAmount(totalAmount - invoice.paidAmount);
     if (invoice.remainingAmount < 0) invoice.remainingAmount = 0;
-    invoice.paidBaseAmount = this._roundMonetaryAmount(paidBaseAmount + paymentAmount);
-    invoice.remainingBaseAmount = this._roundMonetaryAmount(totalBaseAmount - invoice.paidBaseAmount);
+    invoice.paidBaseAmount = isFinalPayment
+      ? totalBaseAmount
+      : this._roundMonetaryAmount(paidBaseAmount + carryingBaseAmount);
+    invoice.remainingBaseAmount = isFinalPayment
+      ? 0
+      : this._roundMonetaryAmount(totalBaseAmount - invoice.paidBaseAmount);
     if (invoice.remainingBaseAmount < 0) invoice.remainingBaseAmount = 0;
     invoice.payments.push({
       amount: paymentAmount,
-      baseAmount: paymentAmount,
-      carryingBaseAmount: paymentAmount,
+      baseAmount: paymentBaseAmount,
+      carryingBaseAmount,
       date,
       accountId: paymentAccountId,
       journalEntryId: entry._id,
       paymentCurrency: normalizedPaymentCurrency,
-      paymentExchangeRate: '1',
+      paymentExchangeRate: paymentExchangeRateStr,
       paymentExchangeRateDate: exchangeRateDate,
       paymentExchangeRateSource: paymentExchangeRateSource || 'company_rate',
-      fxGainLossAmount: 0,
-      fxGainLossType: 'none',
+      fxGainLossAmount,
+      fxGainLossType,
       reference: paymentReference,
     });
     invoice.status = invoice.remainingAmount === 0
@@ -934,9 +1011,34 @@ class InvoiceService {
     }
   }
 
+  _assertForeignCurrencyInvoicePaymentInput(invoice, paymentCurrency, paymentExchangeRate) {
+    const baseCurrency = this._normalizePostingCurrency(invoice.baseCurrency || 'SAR');
+    const documentCurrency = this._normalizePostingCurrency(
+      invoice.documentCurrency || invoice.currency || baseCurrency
+    );
+
+    if (paymentCurrency !== documentCurrency) {
+      throw new BadRequestError(
+        'Payment currency must match invoice document currency',
+        'PAYMENT_CURRENCY_MISMATCH'
+      );
+    }
+
+    if (!this._moneyToString(paymentExchangeRate)) {
+      throw new BadRequestError(
+        'Payment exchange rate is required for foreign-currency invoice payments',
+        'PAYMENT_EXCHANGE_RATE_REQUIRED'
+      );
+    }
+  }
+
   _isRateOne(rate) {
     const normalized = this._moneyToString(rate);
     return !normalized || /^1(\.0+)?$/.test(normalized);
+  }
+
+  _amountsEqual(left, right) {
+    return toScaledInteger(this._moneyToString(left)) === toScaledInteger(this._moneyToString(right));
   }
 
   _canCancelInvoice(invoice) {

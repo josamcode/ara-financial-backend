@@ -623,7 +623,7 @@ test('vat return uses base-currency amounts for foreign taxed documents', async 
   assert.equal(trialBalance.totals.isBalanced, true);
 });
 
-test('payment safety blocks foreign documents and keeps same-currency payments compatible', async () => {
+test('payment safety blocks foreign bills and keeps same-currency payments compatible', async () => {
   const fixture = await createFixture();
   const accounts = await getAccountsByCode(fixture.tenant._id, ['1111', '1120', '4100', '2110', '5200']);
   const cashAccountId = accounts.get('1111')._id.toString();
@@ -631,33 +631,6 @@ test('payment safety blocks foreign documents and keeps same-currency payments c
   const revenueAccountId = accounts.get('4100')._id.toString();
   const apAccountId = accounts.get('2110')._id.toString();
   const expenseAccountId = accounts.get('5200')._id.toString();
-
-  const foreignInvoice = await invoiceService.createInvoice(
-    fixture.tenant._id,
-    fixture.user._id,
-    baseInvoicePayload({
-      documentCurrency: 'USD',
-      exchangeRate: '3.75',
-      exchangeRateDate: '2026-04-01',
-      exchangeRateSource: 'manual',
-    }),
-    { auditContext: fixture.auditContext }
-  );
-  await invoiceService.markAsSent(
-    foreignInvoice._id,
-    fixture.tenant._id,
-    fixture.user._id,
-    { arAccountId, revenueAccountId },
-    { auditContext: fixture.auditContext }
-  );
-
-  await assertForeignPaymentUnsupported(() => invoiceService.recordPayment(
-    foreignInvoice._id,
-    fixture.tenant._id,
-    fixture.user._id,
-    { cashAccountId, amount: '100', paymentDate: '2026-04-10' },
-    { auditContext: fixture.auditContext }
-  ));
 
   const foreignBill = await billService.createBill(
     fixture.tenant._id,
