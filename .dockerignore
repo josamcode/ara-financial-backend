@@ -1,0 +1,16 @@
+.git
+.env
+.env.*
+!.env.example
+!.env.test.example
+node_modules
+npm-debug.log*
+*.log
+coverage
+dist
+docs
+postman
+test
+scripts
+verify_output.txt
+verify_utf8.txt

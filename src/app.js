@@ -44,6 +44,10 @@ function createApp() {
   // ── Request logging ────────────────────────────
   app.use(requestLogger);
 
+  app.get('/health', (_req, res) => {
+    res.status(200).json({ status: 'ok' });
+  });
+
   // ── Health check (unprotected) ─────────────────
   app.get('/api/v1/health', (_req, res) => {
     res.json({
