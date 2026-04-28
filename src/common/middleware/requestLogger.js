@@ -1,13 +1,13 @@
 'use strict';
 
-const { v4: uuidv4 } = require('uuid');
+const { randomUUID } = require('node:crypto');
 const logger = require('../../config/logger');
 
 /**
  * Assigns a unique request ID and logs incoming requests.
  */
 function requestLogger(req, res, next) {
-  req.id = req.headers['x-request-id'] || uuidv4();
+  req.id = req.headers['x-request-id'] || randomUUID();
   const start = Date.now();
 
   res.on('finish', () => {
