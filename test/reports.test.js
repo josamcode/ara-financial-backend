@@ -11,6 +11,7 @@ const supplierService = require('../src/modules/supplier/supplier.service');
 const invoiceService = require('../src/modules/invoice/invoice.service');
 const billService = require('../src/modules/bill/bill.service');
 const { Invoice } = require('../src/modules/invoice/invoice.model');
+const { Bill } = require('../src/modules/bill/bill.model');
 const {
   ensureDatabase,
   closeDatabase,
@@ -53,6 +54,128 @@ async function createInputVatAccount(fixture) {
   );
 }
 
+async function createReportTaxedInvoice(fixture, accounts, taxRate, {
+  amount,
+  issueDate,
+  dueDate = '2026-04-30',
+  customerName = 'VAT Customer',
+  finalStatus = 'sent',
+  documentCurrency = 'SAR',
+  exchangeRate,
+}) {
+  const invoice = await invoiceService.createInvoice(
+    fixture.tenant._id,
+    fixture.user._id,
+    {
+      customerName,
+      issueDate,
+      dueDate,
+      documentCurrency,
+      exchangeRate,
+      exchangeRateDate: exchangeRate ? issueDate : undefined,
+      exchangeRateSource: exchangeRate ? 'manual' : undefined,
+      lineItems: [{
+        description: 'Taxed sale',
+        quantity: '1',
+        unitPrice: amount,
+        taxRateId: taxRate._id.toString(),
+        lineTotal: amount,
+      }],
+      subtotal: amount,
+      total: amount,
+      notes: '',
+    },
+    { auditContext: fixture.auditContext }
+  );
+
+  if (finalStatus === 'draft') {
+    return invoice;
+  }
+
+  await invoiceService.markAsSent(
+    invoice._id,
+    fixture.tenant._id,
+    fixture.user._id,
+    {
+      arAccountId: accounts.get('1120')._id.toString(),
+      revenueAccountId: accounts.get('4100')._id.toString(),
+    },
+    { auditContext: fixture.auditContext }
+  );
+
+  if (finalStatus === 'cancelled') {
+    return invoiceService.cancelInvoice(
+      invoice._id,
+      fixture.tenant._id,
+      fixture.user._id,
+      { auditContext: fixture.auditContext }
+    );
+  }
+
+  return invoiceService.getInvoiceById(invoice._id, fixture.tenant._id);
+}
+
+async function createReportTaxedBill(fixture, accounts, taxRate, {
+  amount,
+  issueDate,
+  dueDate = '2026-04-30',
+  supplierName = 'VAT Supplier',
+  finalStatus = 'posted',
+  documentCurrency = 'SAR',
+  exchangeRate,
+}) {
+  const bill = await billService.createBill(
+    fixture.tenant._id,
+    fixture.user._id,
+    {
+      supplierName,
+      issueDate,
+      dueDate,
+      documentCurrency,
+      exchangeRate,
+      exchangeRateDate: exchangeRate ? issueDate : undefined,
+      exchangeRateSource: exchangeRate ? 'manual' : undefined,
+      lineItems: [{
+        description: 'Taxed purchase',
+        quantity: '1',
+        unitPrice: amount,
+        taxRateId: taxRate._id.toString(),
+        lineTotal: amount,
+      }],
+      subtotal: amount,
+      total: amount,
+      notes: '',
+    },
+    { auditContext: fixture.auditContext }
+  );
+
+  if (finalStatus === 'draft') {
+    return bill;
+  }
+
+  await billService.postBill(
+    bill._id,
+    fixture.tenant._id,
+    fixture.user._id,
+    {
+      apAccountId: accounts.get('2110')._id.toString(),
+      debitAccountId: accounts.get('5200')._id.toString(),
+    },
+    { auditContext: fixture.auditContext }
+  );
+
+  if (finalStatus === 'cancelled') {
+    return billService.cancelBill(
+      bill._id,
+      fixture.tenant._id,
+      fixture.user._id,
+      { auditContext: fixture.auditContext }
+    );
+  }
+
+  return billService.getBillById(bill._id, fixture.tenant._id);
+}
+
 test('report routes return validation 4xx responses for missing required params', async () => {
   const fixture = await createTenantFixture({ fiscalYear: 2026 });
   tenantIds.add(fixture.tenant._id);
@@ -86,6 +209,11 @@ test('vat return report aggregates tenant-scoped output and input VAT', async ()
     fixture.tenant._id,
     fixture.user._id,
     { name: 'VAT 15%', code: 'VAT15RPT', rate: '15', type: 'both' }
+  );
+  const reducedTaxRate = await taxService.createTaxRate(
+    fixture.tenant._id,
+    fixture.user._id,
+    { name: 'VAT 5%', code: 'VAT5RPT', rate: '5', type: 'both' }
   );
   const otherTaxRate = await taxService.createTaxRate(
     otherFixture.tenant._id,
@@ -210,6 +338,11 @@ test('vat return report aggregates tenant-scoped output and input VAT', async ()
     issueDate: '2026-04-10',
     customerName: 'Included Customer',
   });
+  await createTaxedInvoice(fixture, accounts, reducedTaxRate, {
+    amount: '20',
+    issueDate: '2026-04-18',
+    customerName: 'Reduced Customer',
+  });
   await createTaxedInvoice(fixture, accounts, taxRate, {
     amount: '50',
     issueDate: '2026-04-11',
@@ -224,6 +357,14 @@ test('vat return report aggregates tenant-scoped output and input VAT', async ()
     amount: '200',
     issueDate: '2026-05-01',
   });
+  const softDeletedInvoice = await createTaxedInvoice(fixture, accounts, taxRate, {
+    amount: '300',
+    issueDate: '2026-04-20',
+  });
+  await Invoice.updateOne(
+    { _id: softDeletedInvoice._id, tenantId: fixture.tenant._id },
+    { $set: { deletedAt: new Date() } }
+  );
   await createTaxedInvoice(otherFixture, otherAccounts, otherTaxRate, {
     amount: '999',
     issueDate: '2026-04-10',
@@ -265,6 +406,11 @@ test('vat return report aggregates tenant-scoped output and input VAT', async ()
     issueDate: '2026-04-14',
     supplierName: 'Included Supplier',
   });
+  await createTaxedBill(fixture, accounts, reducedTaxRate, {
+    amount: '20',
+    issueDate: '2026-04-19',
+    supplierName: 'Reduced Supplier',
+  });
   await createTaxedBill(fixture, accounts, taxRate, {
     amount: '20',
     issueDate: '2026-04-15',
@@ -279,6 +425,14 @@ test('vat return report aggregates tenant-scoped output and input VAT', async ()
     amount: '60',
     issueDate: '2026-03-31',
   });
+  const softDeletedBill = await createTaxedBill(fixture, accounts, taxRate, {
+    amount: '300',
+    issueDate: '2026-04-20',
+  });
+  await Bill.updateOne(
+    { _id: softDeletedBill._id, tenantId: fixture.tenant._id },
+    { $set: { deletedAt: new Date() } }
+  );
   await createTaxedBill(otherFixture, otherAccounts, otherTaxRate, {
     amount: '888',
     issueDate: '2026-04-14',
@@ -327,37 +481,115 @@ test('vat return report aggregates tenant-scoped output and input VAT', async ()
   assert.equal(response.status, 200);
   assert.equal(body.success, true);
   assert.deepEqual(body.data.summary, {
-    outputVAT: '15',
-    inputVAT: '6',
+    outputVAT: '16',
+    inputVAT: '7',
     netVAT: '9',
     status: 'payable',
   });
   assert.equal(body.data.basis, 'accrual');
+  assert.equal(body.data.currency, 'SAR');
+  assert.equal(body.data.amountsIn, 'baseCurrency');
   assert.match(body.data.period.startDate, /^2026-04-01T00:00:00\.000Z$/);
   assert.match(body.data.period.endDate, /^2026-04-30T23:59:59\.999Z$/);
-  assert.equal(body.data.breakdown.length, 1);
-  assert.deepEqual(body.data.breakdown[0], {
+  assert.deepEqual(body.data.outputVat, {
+    taxableAmount: '120',
+    taxAmount: '16',
+    byRate: [
+      {
+        taxRateId: taxRate._id.toString(),
+        taxRateName: 'VAT 15%',
+        taxRate: '15',
+        taxableAmount: '100',
+        taxAmount: '15',
+        documentsCount: 1,
+      },
+      {
+        taxRateId: reducedTaxRate._id.toString(),
+        taxRateName: 'VAT 5%',
+        taxRate: '5',
+        taxableAmount: '20',
+        taxAmount: '1',
+        documentsCount: 1,
+      },
+    ],
+  });
+  assert.deepEqual(body.data.inputVat, {
+    taxableAmount: '60',
+    taxAmount: '7',
+    byRate: [
+      {
+        taxRateId: taxRate._id.toString(),
+        taxRateName: 'VAT 15%',
+        taxRate: '15',
+        taxableAmount: '40',
+        taxAmount: '6',
+        documentsCount: 1,
+      },
+      {
+        taxRateId: reducedTaxRate._id.toString(),
+        taxRateName: 'VAT 5%',
+        taxRate: '5',
+        taxableAmount: '20',
+        taxAmount: '1',
+        documentsCount: 1,
+      },
+    ],
+  });
+  assert.deepEqual(body.data.netVat, {
+    amount: '9',
+    status: 'payable',
+  });
+  assert.deepEqual(body.data.documents, {
+    salesInvoicesCount: 2,
+    purchaseBillsCount: 2,
+  });
+  assert.equal(body.data.breakdown.length, 2);
+  const standardBreakdown = body.data.breakdown.find((row) => row.taxRateId === taxRate._id.toString());
+  assert.deepEqual(standardBreakdown, {
     taxRateId: taxRate._id.toString(),
     taxRateName: 'VAT 15%',
     taxRate: '15',
+    outputTaxableAmount: '100',
+    inputTaxableAmount: '40',
+    taxableAmount: '60',
     outputVAT: '15',
     inputVAT: '6',
     netVAT: '9',
+    outputDocumentsCount: 1,
+    inputDocumentsCount: 1,
   });
-  assert.equal(body.data.details.sales.length, 1);
+  assert.equal(body.data.details.sales.length, 2);
   assert.equal(body.data.details.sales[0].invoiceId, includedInvoice._id.toString());
+  assert.equal(body.data.details.sales[0].documentType, 'salesInvoice');
+  assert.equal(body.data.details.sales[0].documentId, includedInvoice._id.toString());
   assert.equal(body.data.details.sales[0].invoiceNumber, includedInvoice.invoiceNumber);
+  assert.equal(body.data.details.sales[0].documentNumber, includedInvoice.invoiceNumber);
+  assert.match(body.data.details.sales[0].issueDate, /^2026-04-10T00:00:00\.000Z$/);
   assert.equal(body.data.details.sales[0].customerName, 'Included Customer');
   assert.equal(body.data.details.sales[0].taxableAmount, '100');
   assert.equal(body.data.details.sales[0].taxAmount, '15');
   assert.equal(body.data.details.sales[0].total, '115');
-  assert.equal(body.data.details.purchases.length, 1);
+  assert.equal(body.data.details.sales[0].documentCurrency, 'SAR');
+  assert.equal(body.data.details.sales[0].baseCurrency, 'SAR');
+  assert.equal(body.data.details.sales[0].lines[0].taxRateId, taxRate._id.toString());
+  assert.equal(body.data.details.sales[0].lines[0].taxableAmount, '100');
+  assert.equal(body.data.details.sales[0].lines[0].taxAmount, '15');
+  assert.equal(body.data.details.purchases.length, 2);
   assert.equal(body.data.details.purchases[0].billId, includedBill._id.toString());
+  assert.equal(body.data.details.purchases[0].documentType, 'purchaseBill');
+  assert.equal(body.data.details.purchases[0].documentId, includedBill._id.toString());
   assert.equal(body.data.details.purchases[0].billNumber, includedBill.billNumber);
+  assert.equal(body.data.details.purchases[0].documentNumber, includedBill.billNumber);
+  assert.match(body.data.details.purchases[0].issueDate, /^2026-04-14T00:00:00\.000Z$/);
   assert.equal(body.data.details.purchases[0].supplierName, 'Included Supplier');
   assert.equal(body.data.details.purchases[0].taxableAmount, '40');
   assert.equal(body.data.details.purchases[0].taxAmount, '6');
   assert.equal(body.data.details.purchases[0].total, '46');
+  assert.equal(body.data.details.purchases[0].documentCurrency, 'SAR');
+  assert.equal(body.data.details.purchases[0].baseCurrency, 'SAR');
+  assert.equal(body.data.details.purchases[0].lines[0].taxRateId, taxRate._id.toString());
+  assert.equal(body.data.details.purchases[0].lines[0].taxableAmount, '40');
+  assert.equal(body.data.details.purchases[0].lines[0].taxAmount, '6');
 
   const filteredReport = await reportService.getVatReturn(fixture.tenant._id, {
     startDate: '2026-04-01',
@@ -366,6 +598,11 @@ test('vat return report aggregates tenant-scoped output and input VAT', async ()
     refresh: true,
   });
   assert.equal(filteredReport.summary.netVAT, '9');
+  assert.equal(filteredReport.outputVat.taxableAmount, '100');
+  assert.equal(filteredReport.outputVat.taxAmount, '15');
+  assert.equal(filteredReport.inputVat.taxableAmount, '40');
+  assert.equal(filteredReport.inputVat.taxAmount, '6');
+  assert.equal(filteredReport.breakdown.length, 1);
   assert.equal(filteredReport.breakdown[0].taxRateId, taxRate._id.toString());
 
   const noDetailsResult = await fetchJson(
@@ -378,6 +615,163 @@ test('vat return report aggregates tenant-scoped output and input VAT', async ()
   );
   assert.equal(noDetailsResult.response.status, 200);
   assert.equal(Object.prototype.hasOwnProperty.call(noDetailsResult.body.data, 'details'), false);
+});
+
+test('vat return reports refundable and zero statuses with explicit zero-rated taxable lines', async () => {
+  const fixture = await createTenantFixture({ fiscalYear: 2026 });
+  tenantIds.add(fixture.tenant._id);
+
+  await createInputVatAccount(fixture);
+  const accounts = await getAccountsByCode(fixture.tenant._id, ['1120', '4100', '2110', '5200']);
+  const purchaseTaxRate = await taxService.createTaxRate(
+    fixture.tenant._id,
+    fixture.user._id,
+    { name: 'Purchase VAT 15%', code: 'PURCHVAT15RPT', rate: '15', type: 'purchase' }
+  );
+  const zeroTaxRate = await taxService.createTaxRate(
+    fixture.tenant._id,
+    fixture.user._id,
+    { name: 'Zero VAT', code: 'ZEROVATRPT', rate: '0', type: 'sales' }
+  );
+
+  await createReportTaxedBill(fixture, accounts, purchaseTaxRate, {
+    amount: '100',
+    issueDate: '2026-04-05',
+  });
+  await createReportTaxedInvoice(fixture, accounts, zeroTaxRate, {
+    amount: '200',
+    issueDate: '2026-05-05',
+  });
+
+  const refundableReport = await reportService.getVatReturn(fixture.tenant._id, {
+    startDate: '2026-04-01',
+    endDate: '2026-04-30',
+    refresh: true,
+  });
+  assert.deepEqual(refundableReport.summary, {
+    outputVAT: '0',
+    inputVAT: '15',
+    netVAT: '-15',
+    status: 'refundable',
+  });
+  assert.deepEqual(refundableReport.netVat, {
+    amount: '-15',
+    status: 'refundable',
+  });
+  assert.equal(refundableReport.documents.salesInvoicesCount, 0);
+  assert.equal(refundableReport.documents.purchaseBillsCount, 1);
+
+  const zeroReport = await reportService.getVatReturn(fixture.tenant._id, {
+    startDate: '2026-05-01',
+    endDate: '2026-05-31',
+    includeDetails: true,
+    refresh: true,
+  });
+  assert.deepEqual(zeroReport.summary, {
+    outputVAT: '0',
+    inputVAT: '0',
+    netVAT: '0',
+    status: 'zero',
+  });
+  assert.equal(zeroReport.outputVat.taxableAmount, '200');
+  assert.equal(zeroReport.outputVat.taxAmount, '0');
+  assert.deepEqual(zeroReport.outputVat.byRate, [{
+    taxRateId: zeroTaxRate._id.toString(),
+    taxRateName: 'Zero VAT',
+    taxRate: '0',
+    taxableAmount: '200',
+    taxAmount: '0',
+    documentsCount: 1,
+  }]);
+  assert.equal(zeroReport.documents.salesInvoicesCount, 1);
+  assert.equal(zeroReport.details.sales[0].taxableAmount, '200');
+  assert.equal(zeroReport.details.sales[0].taxAmount, '0');
+  assert.equal(zeroReport.details.sales[0].lines[0].taxRateId, zeroTaxRate._id.toString());
+});
+
+test('vat return uses base-currency taxable and VAT amounts for foreign documents', async () => {
+  const fixture = await createTenantFixture({ fiscalYear: 2026 });
+  tenantIds.add(fixture.tenant._id);
+
+  await createInputVatAccount(fixture);
+  const accounts = await getAccountsByCode(fixture.tenant._id, ['1120', '4100', '2110', '5200']);
+  const taxRate = await taxService.createTaxRate(
+    fixture.tenant._id,
+    fixture.user._id,
+    { name: 'Foreign VAT 15%', code: 'FXVAT15RPT', rate: '15', type: 'both' }
+  );
+
+  const invoice = await createReportTaxedInvoice(fixture, accounts, taxRate, {
+    amount: '100',
+    issueDate: '2026-04-10',
+    customerName: 'Foreign Customer',
+    documentCurrency: 'USD',
+    exchangeRate: '3.75',
+  });
+  const bill = await createReportTaxedBill(fixture, accounts, taxRate, {
+    amount: '100',
+    issueDate: '2026-04-11',
+    supplierName: 'Foreign Supplier',
+    documentCurrency: 'USD',
+    exchangeRate: '3.75',
+  });
+
+  const report = await reportService.getVatReturn(fixture.tenant._id, {
+    startDate: '2026-04-01',
+    endDate: '2026-04-30',
+    includeDetails: true,
+    refresh: true,
+  });
+
+  assert.equal(report.currency, 'SAR');
+  assert.equal(report.amountsIn, 'baseCurrency');
+  assert.deepEqual(report.summary, {
+    outputVAT: '56.25',
+    inputVAT: '56.25',
+    netVAT: '0',
+    status: 'zero',
+  });
+  assert.equal(report.outputVat.taxableAmount, '375');
+  assert.equal(report.outputVat.taxAmount, '56.25');
+  assert.equal(report.inputVat.taxableAmount, '375');
+  assert.equal(report.inputVat.taxAmount, '56.25');
+  assert.equal(report.outputVat.byRate[0].taxableAmount, '375');
+  assert.equal(report.outputVat.byRate[0].taxAmount, '56.25');
+  assert.equal(report.inputVat.byRate[0].taxableAmount, '375');
+  assert.equal(report.inputVat.byRate[0].taxAmount, '56.25');
+  assert.equal(report.details.sales[0].invoiceId, invoice._id.toString());
+  assert.equal(report.details.sales[0].documentCurrency, 'USD');
+  assert.equal(report.details.sales[0].baseCurrency, 'SAR');
+  assert.equal(report.details.sales[0].taxableAmount, '375');
+  assert.equal(report.details.sales[0].taxAmount, '56.25');
+  assert.equal(report.details.purchases[0].billId, bill._id.toString());
+  assert.equal(report.details.purchases[0].documentCurrency, 'USD');
+  assert.equal(report.details.purchases[0].baseCurrency, 'SAR');
+  assert.equal(report.details.purchases[0].taxableAmount, '375');
+  assert.equal(report.details.purchases[0].taxAmount, '56.25');
+});
+
+test('vat return endpoint validates required dates, date order, taxRateId, and basis', async () => {
+  const fixture = await createTenantFixture({ fiscalYear: 2026 });
+  tenantIds.add(fixture.tenant._id);
+
+  const headers = {
+    Authorization: `Bearer ${fixture.accessToken}`,
+  };
+  const invalidRequests = [
+    '/api/v1/reports/vat-return',
+    '/api/v1/reports/vat-return?startDate=not-a-date&endDate=2026-04-30',
+    '/api/v1/reports/vat-return?startDate=2026-05-01&endDate=2026-04-30',
+    '/api/v1/reports/vat-return?startDate=2026-04-01&endDate=2026-04-30&taxRateId=bad-id',
+    '/api/v1/reports/vat-return?startDate=2026-04-01&endDate=2026-04-30&basis=cash',
+  ];
+
+  for (const path of invalidRequests) {
+    const { response, body } = await fetchJson(`${serverContext.baseUrl}${path}`, { headers });
+    assert.equal(response.status, 422, path);
+    assert.equal(body.success, false, path);
+    assert.equal(body.error.code, 'VALIDATION_ERROR', path);
+  }
 });
 
 test('balance sheet current-year earnings are limited to the fiscal year containing the as-of date', async () => {

@@ -358,6 +358,8 @@ class ReportService {
       ]);
 
       const groups = new Map();
+      const salesGroups = new Map();
+      const purchaseGroups = new Map();
       const taxRateIds = new Set();
       const sales = this._collectVatDocumentLines({
         documents: invoices,
@@ -365,6 +367,7 @@ class ReportService {
         includeDetails: primaryParams.includeDetails,
         taxRateId: primaryParams.taxRateId,
         groups,
+        sideGroups: salesGroups,
         taxRateIds,
         baseCurrency,
       });
@@ -374,6 +377,7 @@ class ReportService {
         includeDetails: primaryParams.includeDetails,
         taxRateId: primaryParams.taxRateId,
         groups,
+        sideGroups: purchaseGroups,
         taxRateIds,
         baseCurrency,
       });
@@ -382,6 +386,7 @@ class ReportService {
       const outputVAT = sales.taxAmount;
       const inputVAT = purchases.taxAmount;
       const netVAT = outputVAT - inputVAT;
+      const netVatStatus = this._getVatReturnStatus(netVAT);
       const report = {
         period: toPeriodRange(primaryParams.startDate, primaryParams.endDate),
         basis: 'accrual',
@@ -391,7 +396,25 @@ class ReportService {
           outputVAT: formatScaledInteger(outputVAT),
           inputVAT: formatScaledInteger(inputVAT),
           netVAT: formatScaledInteger(netVAT),
-          status: this._getVatReturnStatus(netVAT),
+          status: netVatStatus,
+        },
+        outputVat: {
+          taxableAmount: formatScaledInteger(sales.taxableAmount),
+          taxAmount: formatScaledInteger(outputVAT),
+          byRate: this._formatVatRateBreakdown(salesGroups, taxRatesById),
+        },
+        inputVat: {
+          taxableAmount: formatScaledInteger(purchases.taxableAmount),
+          taxAmount: formatScaledInteger(inputVAT),
+          byRate: this._formatVatRateBreakdown(purchaseGroups, taxRatesById),
+        },
+        netVat: {
+          amount: formatScaledInteger(netVAT),
+          status: netVatStatus,
+        },
+        documents: {
+          salesInvoicesCount: sales.documentsCount,
+          purchaseBillsCount: purchases.documentsCount,
         },
         breakdown: this._formatVatBreakdown(groups, taxRatesById),
       };
@@ -781,20 +804,30 @@ class ReportService {
     includeDetails,
     taxRateId,
     groups,
+    sideGroups,
     taxRateIds,
     baseCurrency,
   }) {
     const details = [];
+    let taxableAmount = 0n;
     let taxAmount = 0n;
+    let documentsCount = 0;
 
     for (const document of documents) {
       let documentTaxableAmount = 0n;
       let documentTaxAmount = 0n;
       let documentTotal = 0n;
+      const documentLineDetails = [];
 
       for (const line of document.lineItems || []) {
         const lineTaxRateId = line.taxRateId?.toString?.() || null;
         if (taxRateId && lineTaxRateId !== taxRateId) {
+          continue;
+        }
+
+        const lineTaxRate = this._toScaledMoney(line.taxRate);
+        const hasTaxClassification = Boolean(lineTaxRateId) || lineTaxRate > 0n;
+        if (!hasTaxClassification) {
           continue;
         }
 
@@ -805,17 +838,17 @@ class ReportService {
           documentField: 'taxAmount',
           requiresBaseAmount: documentLineTaxAmount > 0n,
         });
-        if (lineTaxAmount <= 0n) {
-          continue;
-        }
 
-        const lineTaxRate = this._toScaledMoney(line.taxRate);
         const lineTaxableAmount = this._resolveVatLineBaseAmount(document, line, {
           baseCurrency,
           baseField: 'lineBaseSubtotal',
           documentField: 'lineSubtotal',
           requiresBaseAmount: true,
         });
+        if (lineTaxableAmount <= 0n && lineTaxAmount <= 0n) {
+          continue;
+        }
+
         const lineTotal = this._resolveVatLineBaseAmount(document, line, {
           baseCurrency,
           baseField: 'lineBaseTotal',
@@ -828,7 +861,16 @@ class ReportService {
           taxRateId: lineTaxRateId,
           taxRate: lineTaxRate,
           kind,
+          taxableAmount: lineTaxableAmount,
+          documentId: document._id?.toString?.() ?? String(document._id),
           taxAmount: lineTaxAmount,
+        });
+        this._addVatRateLine(sideGroups, {
+          taxRateId: lineTaxRateId,
+          taxRate: lineTaxRate,
+          taxableAmount: lineTaxableAmount,
+          taxAmount: lineTaxAmount,
+          documentId: document._id?.toString?.() ?? String(document._id),
         });
 
         if (lineTaxRateId) {
@@ -838,19 +880,40 @@ class ReportService {
         documentTaxableAmount += lineTaxableAmount;
         documentTaxAmount += lineTaxAmount;
         documentTotal += lineTotal;
+        taxableAmount += lineTaxableAmount;
         taxAmount += lineTaxAmount;
+
+        if (includeDetails) {
+          documentLineDetails.push(this._formatVatLineDetail(line, {
+            taxRateId: lineTaxRateId,
+            taxRate: lineTaxRate,
+            taxableAmount: lineTaxableAmount,
+            taxAmount: lineTaxAmount,
+            total: lineTotal,
+          }));
+        }
       }
 
-      if (includeDetails && documentTaxAmount > 0n) {
+      if (documentTaxableAmount > 0n || documentTaxAmount > 0n) {
+        documentsCount += 1;
+      }
+
+      if (includeDetails && (documentTaxableAmount > 0n || documentTaxAmount > 0n)) {
         details.push(this._formatVatDetail(document, kind, {
           taxableAmount: documentTaxableAmount,
           taxAmount: documentTaxAmount,
           total: documentTotal,
+          lines: documentLineDetails,
         }));
       }
     }
 
-    return { taxAmount, details };
+    return {
+      taxableAmount,
+      taxAmount,
+      documentsCount,
+      details,
+    };
   }
 
   _resolveVatLineBaseAmount(
@@ -894,23 +957,49 @@ class ReportService {
     );
   }
 
-  _addVatBreakdownLine(groups, { taxRateId, taxRate, kind, taxAmount }) {
+  _addVatBreakdownLine(groups, { taxRateId, taxRate, kind, taxableAmount, taxAmount, documentId }) {
     const key = `${taxRateId || 'manual'}:${formatScaledInteger(taxRate, 6)}`;
     if (!groups.has(key)) {
       groups.set(key, {
         taxRateId,
         taxRate,
+        outputTaxableAmount: 0n,
+        inputTaxableAmount: 0n,
         outputVAT: 0n,
         inputVAT: 0n,
+        outputDocumentIds: new Set(),
+        inputDocumentIds: new Set(),
       });
     }
 
     const group = groups.get(key);
     if (kind === 'sales') {
+      group.outputTaxableAmount += taxableAmount;
       group.outputVAT += taxAmount;
+      group.outputDocumentIds.add(documentId);
     } else {
+      group.inputTaxableAmount += taxableAmount;
       group.inputVAT += taxAmount;
+      group.inputDocumentIds.add(documentId);
     }
+  }
+
+  _addVatRateLine(groups, { taxRateId, taxRate, taxableAmount, taxAmount, documentId }) {
+    const key = `${taxRateId || 'manual'}:${formatScaledInteger(taxRate, 6)}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        taxRateId,
+        taxRate,
+        taxableAmount: 0n,
+        taxAmount: 0n,
+        documentIds: new Set(),
+      });
+    }
+
+    const group = groups.get(key);
+    group.taxableAmount += taxableAmount;
+    group.taxAmount += taxAmount;
+    group.documentIds.add(documentId);
   }
 
   async _getTaxRateNamesById(tenantId, taxRateIds) {
@@ -938,9 +1027,14 @@ class ReportService {
           taxRateId: group.taxRateId,
           taxRateName: taxRate?.name || (group.taxRateId ? 'Unknown tax rate' : 'Manual/unknown tax rate'),
           taxRate: formatScaledInteger(group.taxRate, 6),
+          outputTaxableAmount: formatScaledInteger(group.outputTaxableAmount),
+          inputTaxableAmount: formatScaledInteger(group.inputTaxableAmount),
+          taxableAmount: formatScaledInteger(group.outputTaxableAmount - group.inputTaxableAmount),
           outputVAT: formatScaledInteger(group.outputVAT),
           inputVAT: formatScaledInteger(group.inputVAT),
           netVAT: formatScaledInteger(netVAT),
+          outputDocumentsCount: group.outputDocumentIds.size,
+          inputDocumentsCount: group.inputDocumentIds.size,
         };
       })
       .sort((left, right) => (
@@ -950,34 +1044,84 @@ class ReportService {
       ));
   }
 
-  _formatVatDetail(document, kind, totals) {
-    const base = {
-      date: toIsoString(document.issueDate),
+  _formatVatRateBreakdown(groups, taxRatesById) {
+    return Array.from(groups.values())
+      .map((group) => {
+        const taxRate = group.taxRateId ? taxRatesById.get(group.taxRateId) : null;
+
+        return {
+          taxRateId: group.taxRateId,
+          taxRateName: taxRate?.name || (group.taxRateId ? 'Unknown tax rate' : 'Manual/unknown tax rate'),
+          taxRate: formatScaledInteger(group.taxRate, 6),
+          taxableAmount: formatScaledInteger(group.taxableAmount),
+          taxAmount: formatScaledInteger(group.taxAmount),
+          documentsCount: group.documentIds.size,
+        };
+      })
+      .sort((left, right) => (
+        left.taxRateName.localeCompare(right.taxRateName) ||
+        left.taxRate.localeCompare(right.taxRate) ||
+        String(left.taxRateId || '').localeCompare(String(right.taxRateId || ''))
+      ));
+  }
+
+  _formatVatLineDetail(line, totals) {
+    return {
+      lineId: line._id?.toString?.() ?? null,
+      description: line.description || '',
+      taxRateId: totals.taxRateId,
+      taxRate: formatScaledInteger(totals.taxRate, 6),
       taxableAmount: formatScaledInteger(totals.taxableAmount),
       taxAmount: formatScaledInteger(totals.taxAmount),
       total: formatScaledInteger(totals.total),
     };
+  }
+
+  _formatVatDetail(document, kind, totals) {
+    const base = {
+      issueDate: toIsoString(document.issueDate),
+      taxableAmount: formatScaledInteger(totals.taxableAmount),
+      taxAmount: formatScaledInteger(totals.taxAmount),
+      total: formatScaledInteger(totals.total),
+      documentCurrency: this._getDocumentCurrency(document),
+      baseCurrency: this._getDocumentBaseCurrency(document),
+      lines: totals.lines,
+    };
 
     if (kind === 'sales') {
       return {
+        documentType: 'salesInvoice',
+        documentId: document._id.toString(),
+        documentNumber: document.invoiceNumber,
         invoiceId: document._id.toString(),
         invoiceNumber: document.invoiceNumber,
-        date: base.date,
+        date: base.issueDate,
+        issueDate: base.issueDate,
         customerName: document.customerName || '-',
         taxableAmount: base.taxableAmount,
         taxAmount: base.taxAmount,
         total: base.total,
+        documentCurrency: base.documentCurrency,
+        baseCurrency: base.baseCurrency,
+        lines: base.lines,
       };
     }
 
     return {
+      documentType: 'purchaseBill',
+      documentId: document._id.toString(),
+      documentNumber: document.billNumber,
       billId: document._id.toString(),
       billNumber: document.billNumber,
-      date: base.date,
+      date: base.issueDate,
+      issueDate: base.issueDate,
       supplierName: document.supplierName || '-',
       taxableAmount: base.taxableAmount,
       taxAmount: base.taxAmount,
       total: base.total,
+      documentCurrency: base.documentCurrency,
+      baseCurrency: base.baseCurrency,
+      lines: base.lines,
     };
   }
 
