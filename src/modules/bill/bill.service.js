@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const { Bill } = require('./bill.model');
 const BillCounter = require('./billCounter.model');
 const { Supplier } = require('../supplier/supplier.model');
+const accountService = require('../account/account.service');
 const journalService = require('../journal/journal.service');
 const taxService = require('../tax/tax.service');
 const auditService = require('../audit/audit.service');
@@ -14,6 +15,7 @@ const {
   calculateBaseTotals,
   resolveDocumentCurrencySnapshot,
 } = require('../currency/currency-snapshot');
+const { calculateFxPayment } = require('../currency/fx-payment');
 const {
   buildBillStatusFilter,
   PAYABLE_BILL_STATUSES,
@@ -363,12 +365,6 @@ class BillService {
   ) {
     const bill = await Bill.findOne({ _id: billId, tenantId });
     if (!bill) throw new NotFoundError('Bill not found');
-    if (this._isForeignCurrencyDocument(bill)) {
-      throw new BadRequestError(
-        'Foreign-currency payments require FX gain/loss handling and are not supported in this version',
-        'FOREIGN_CURRENCY_PAYMENT_UNSUPPORTED'
-      );
-    }
     if (!PAYABLE_BILL_STATUSES.includes(bill.status)) {
       throw new BadRequestError('Only posted, overdue, or partially paid bills can be paid');
     }
@@ -378,7 +374,16 @@ class BillService {
       throw new BadRequestError('Cash or bank account is required');
     }
     const normalizedPaymentCurrency = this._normalizePaymentCurrency(paymentCurrency, bill);
-    this._assertSameCurrencyPaymentInput(bill, normalizedPaymentCurrency, paymentExchangeRate);
+    const isForeignPayment = this._isForeignCurrencyDocument(bill);
+    if (isForeignPayment) {
+      this._assertForeignCurrencyBillPaymentInput(
+        bill,
+        normalizedPaymentCurrency,
+        paymentExchangeRate
+      );
+    } else {
+      this._assertSameCurrencyPaymentInput(bill, normalizedPaymentCurrency, paymentExchangeRate);
+    }
 
     const totalAmount = resolveBillTotalAmount(bill);
     const paidAmount = resolveBillPaidAmount(bill, totalAmount);
@@ -405,10 +410,74 @@ class BillService {
     }
 
     const amountStr = paymentAmount.toFixed(6).replace(/\.?0+$/, '');
+    const isFinalPayment = this._amountsEqual(paymentAmount, remainingAmount);
     const date = paymentDate ? new Date(paymentDate) : new Date();
     const exchangeRateDate = paymentExchangeRateDate ? new Date(paymentExchangeRateDate) : date;
     const paymentReference = reference ? String(reference).trim() : '';
     const paymentDescription = `Bill payment - ${bill.billNumber}`;
+
+    let paymentBaseAmount = paymentAmount;
+    let carryingBaseAmount = paymentAmount;
+    let paymentBaseAmountStr = amountStr;
+    let carryingBaseAmountStr = amountStr;
+    let paymentExchangeRateStr = '1';
+    let fxGainLossAmount = 0;
+    let fxGainLossAmountStr = '0';
+    let fxGainLossType = 'none';
+    let lines = [
+      { accountId: apAccountId, debit: amountStr, credit: '0', description: paymentDescription },
+      { accountId: paymentAccountId, debit: '0', credit: amountStr, description: paymentDescription },
+    ];
+
+    if (isForeignPayment) {
+      const fxPayment = calculateFxPayment({
+        documentAmount: amountStr,
+        documentExchangeRate: bill.exchangeRate,
+        paymentExchangeRate,
+        isFinalPayment,
+        remainingBaseAmount: bill.remainingBaseAmount,
+      });
+
+      paymentBaseAmount = roundMonetaryAmount(Number(fxPayment.paymentBaseAmount));
+      carryingBaseAmount = roundMonetaryAmount(Number(fxPayment.carryingBaseAmount));
+      paymentBaseAmountStr = fxPayment.paymentBaseAmount;
+      carryingBaseAmountStr = fxPayment.carryingBaseAmount;
+      paymentExchangeRateStr = this._moneyToString(paymentExchangeRate);
+      fxGainLossAmount = roundMonetaryAmount(Number(fxPayment.fxGainLossAmount));
+      fxGainLossAmountStr = fxPayment.fxGainLossAmount;
+      fxGainLossType = this._toBillFxGainLossType(fxPayment.fxGainLossType);
+
+      lines = [
+        { accountId: apAccountId, debit: carryingBaseAmountStr, credit: '0', description: paymentDescription },
+      ];
+
+      if (fxGainLossType === 'loss') {
+        const fxLossAccount = await accountService.findFxLossAccount(tenantId);
+        lines.push({
+          accountId: fxLossAccount._id.toString(),
+          debit: fxGainLossAmountStr,
+          credit: '0',
+          description: paymentDescription,
+        });
+      }
+
+      lines.push({
+        accountId: paymentAccountId,
+        debit: '0',
+        credit: paymentBaseAmountStr,
+        description: paymentDescription,
+      });
+
+      if (fxGainLossType === 'gain') {
+        const fxGainAccount = await accountService.findFxGainAccount(tenantId);
+        lines.push({
+          accountId: fxGainAccount._id.toString(),
+          debit: '0',
+          credit: fxGainLossAmountStr,
+          description: paymentDescription,
+        });
+      }
+    }
 
     const entry = await journalService.createEntry(
       tenantId,
@@ -417,35 +486,40 @@ class BillService {
         date: date.toISOString(),
         description: paymentDescription,
         reference: bill.billNumber,
-        lines: [
-          { accountId: apAccountId, debit: amountStr, credit: '0' },
-          { accountId: paymentAccountId, debit: '0', credit: amountStr },
-        ].map((line) => ({ ...line, description: paymentDescription })),
+        lines: lines.map((line) => ({ ...line, description: paymentDescription })),
       },
       { auditContext: options.auditContext }
     );
 
     await journalService.postEntry(entry._id, tenantId, userId, { auditContext: options.auditContext });
 
-    bill.paidAmount = roundMonetaryAmount(paidAmount + paymentAmount);
-    bill.remainingAmount = roundMonetaryAmount(totalAmount - bill.paidAmount);
+    bill.paidAmount = isFinalPayment
+      ? totalAmount
+      : roundMonetaryAmount(paidAmount + paymentAmount);
+    bill.remainingAmount = isFinalPayment
+      ? 0
+      : roundMonetaryAmount(totalAmount - bill.paidAmount);
     if (bill.remainingAmount < 0) bill.remainingAmount = 0;
-    bill.paidBaseAmount = roundMonetaryAmount(paidBaseAmount + paymentAmount);
-    bill.remainingBaseAmount = roundMonetaryAmount(totalBaseAmount - bill.paidBaseAmount);
+    bill.paidBaseAmount = isFinalPayment
+      ? totalBaseAmount
+      : roundMonetaryAmount(paidBaseAmount + carryingBaseAmount);
+    bill.remainingBaseAmount = isFinalPayment
+      ? 0
+      : roundMonetaryAmount(totalBaseAmount - bill.paidBaseAmount);
     if (bill.remainingBaseAmount < 0) bill.remainingBaseAmount = 0;
     bill.payments.push({
       amount: paymentAmount,
-      baseAmount: paymentAmount,
-      carryingBaseAmount: paymentAmount,
+      baseAmount: paymentBaseAmount,
+      carryingBaseAmount,
       date,
       accountId: paymentAccountId,
       journalEntryId: entry._id,
       paymentCurrency: normalizedPaymentCurrency,
-      paymentExchangeRate: '1',
+      paymentExchangeRate: paymentExchangeRateStr,
       paymentExchangeRateDate: exchangeRateDate,
       paymentExchangeRateSource: paymentExchangeRateSource || 'company_rate',
-      fxGainLossAmount: 0,
-      fxGainLossType: 'none',
+      fxGainLossAmount,
+      fxGainLossType,
       reference: paymentReference,
     });
     bill.status = bill.remainingAmount === 0
@@ -867,9 +941,40 @@ class BillService {
     }
   }
 
+  _assertForeignCurrencyBillPaymentInput(bill, paymentCurrency, paymentExchangeRate) {
+    const baseCurrency = this._normalizePostingCurrency(bill.baseCurrency || 'SAR');
+    const documentCurrency = this._normalizePostingCurrency(
+      bill.documentCurrency || bill.currency || baseCurrency
+    );
+
+    if (paymentCurrency !== documentCurrency) {
+      throw new BadRequestError(
+        'Payment currency must match bill document currency',
+        'PAYMENT_CURRENCY_MISMATCH'
+      );
+    }
+
+    if (!this._moneyToString(paymentExchangeRate)) {
+      throw new BadRequestError(
+        'Payment exchange rate is required for foreign-currency bill payments',
+        'PAYMENT_EXCHANGE_RATE_REQUIRED'
+      );
+    }
+  }
+
   _isRateOne(rate) {
     const normalized = this._moneyToString(rate);
     return !normalized || /^1(\.0+)?$/.test(normalized);
+  }
+
+  _amountsEqual(left, right) {
+    return toScaledInteger(this._moneyToString(left)) === toScaledInteger(this._moneyToString(right));
+  }
+
+  _toBillFxGainLossType(invoiceStyleType) {
+    if (invoiceStyleType === 'gain') return 'loss';
+    if (invoiceStyleType === 'loss') return 'gain';
+    return 'none';
   }
 
   _canCancelBill(bill) {

@@ -130,17 +130,6 @@ function assertExchangeRateRequired(promiseFactory) {
   });
 }
 
-function assertForeignPaymentUnsupported(promiseFactory) {
-  return assert.rejects(promiseFactory, (error) => {
-    assert.equal(error.code, 'FOREIGN_CURRENCY_PAYMENT_UNSUPPORTED');
-    assert.equal(
-      error.message,
-      'Foreign-currency payments require FX gain/loss handling and are not supported in this version'
-    );
-    return true;
-  });
-}
-
 test('FX payment helper calculates invoice-style gain/loss numbers', () => {
   const result = calculateFxPayment({
     documentAmount: '100',
@@ -623,7 +612,7 @@ test('vat return uses base-currency amounts for foreign taxed documents', async 
   assert.equal(trialBalance.totals.isBalanced, true);
 });
 
-test('payment safety blocks foreign bills and keeps same-currency payments compatible', async () => {
+test('payment safety keeps same-currency invoice and bill payments compatible', async () => {
   const fixture = await createFixture();
   const accounts = await getAccountsByCode(fixture.tenant._id, ['1111', '1120', '4100', '2110', '5200']);
   const cashAccountId = accounts.get('1111')._id.toString();
@@ -631,33 +620,6 @@ test('payment safety blocks foreign bills and keeps same-currency payments compa
   const revenueAccountId = accounts.get('4100')._id.toString();
   const apAccountId = accounts.get('2110')._id.toString();
   const expenseAccountId = accounts.get('5200')._id.toString();
-
-  const foreignBill = await billService.createBill(
-    fixture.tenant._id,
-    fixture.user._id,
-    baseBillPayload({
-      documentCurrency: 'USD',
-      exchangeRate: '3.75',
-      exchangeRateDate: '2026-04-01',
-      exchangeRateSource: 'manual',
-    }),
-    { auditContext: fixture.auditContext }
-  );
-  await billService.postBill(
-    foreignBill._id,
-    fixture.tenant._id,
-    fixture.user._id,
-    { apAccountId, debitAccountId: expenseAccountId },
-    { auditContext: fixture.auditContext }
-  );
-
-  await assertForeignPaymentUnsupported(() => billService.recordPayment(
-    foreignBill._id,
-    fixture.tenant._id,
-    fixture.user._id,
-    { cashAccountId, amount: '100', paymentDate: '2026-04-10' },
-    { auditContext: fixture.auditContext }
-  ));
 
   const sameCurrencyInvoice = await invoiceService.createInvoice(
     fixture.tenant._id,
